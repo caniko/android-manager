@@ -132,6 +132,8 @@ pub struct SourceIntent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
 }
 
@@ -426,7 +428,10 @@ pub fn lock_key(source: &SourceIntent, package: &str) -> String {
     match source.kind.as_str() {
         "fdroid" => format!(
             "fdroid:{}:{package}",
-            source.repository.as_deref().unwrap_or("fdroid")
+            source
+                .repository
+                .as_deref()
+                .unwrap_or("https://f-droid.org/repo")
         ),
         other => format!("{other}:{package}"),
     }

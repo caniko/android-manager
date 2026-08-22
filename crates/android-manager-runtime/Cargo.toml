@@ -12,6 +12,7 @@ android-manager-artifact.workspace = true
 android-manager-device-adb.workspace = true
 android-manager-engine.workspace = true
 android-manager-model.workspace = true
+android-manager-provider-fdroid.workspace = true
 android-manager-provider-release.workspace = true
 anyhow.workspace = true
 nix-manager-core.workspace = true

@@ -53,6 +53,7 @@ fn fixture(dir: &Path) -> (PathBuf, Manifest, StaticInspector) {
                                 url: None,
                                 sha256: Some(sha),
                                 repository: None,
+                                identity: None,
                                 channel: None,
                             }),
                             version_policy: VersionPolicy::LockedUpgradeOnly,
@@ -99,6 +100,9 @@ fn lock_plan_apply_verify_is_idempotent() {
         store: HashingStore::new(dir.path().join("cache")),
         state_dir: dir.path().join("state"),
         confirmer: Box::new(AutoConfirmer),
+        fetcher: Box::new(StaticFetcher {
+            index: android_manager_provider_fdroid::IndexV1::default(),
+        }),
     };
     runtime.lock().unwrap();
     runtime.realize().unwrap();
@@ -127,10 +131,92 @@ fn apply_rejects_stale_plan_bindings() {
         store: HashingStore::new(dir.path().join("cache")),
         state_dir: dir.path().join("state"),
         confirmer: Box::new(AutoConfirmer),
+        fetcher: Box::new(StaticFetcher {
+            index: android_manager_provider_fdroid::IndexV1::default(),
+        }),
     };
     runtime.lock().unwrap();
     let mut stale = runtime.plan().unwrap();
     stale.snapshot_digest = "nope".into();
     let err = runtime.apply(Some(&stale)).unwrap_err();
     assert!(err.to_string().contains("bindings changed"));
+}
+
+#[test]
+fn lock_resolves_fdroid_from_signed_index_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut manifest = fixture(dir.path()).1;
+    let app = manifest
+        .device
+        .users
+        .get_mut("owner")
+        .unwrap()
+        .apps
+        .get_mut("org.example.app")
+        .unwrap();
+    app.source = Some(SourceIntent {
+        kind: "fdroid".into(),
+        path: None,
+        url: None,
+        sha256: None,
+        repository: Some("https://f-droid.org/repo".into()),
+        identity: Some("sha256:deadbeef".into()),
+        channel: None,
+    });
+    let inspector = StaticInspector {
+        package: InspectedPackage {
+            package_name: "org.example.app".into(),
+            version_code: 10,
+            version_name: Some("1.0".into()),
+            signers: vec!["sha256:abcd".into()],
+            min_sdk: Some(28),
+            abis: vec!["arm64-v8a".into()],
+        },
+    };
+    let mut runtime = Runtime {
+        manifest,
+        lock: LockFile {
+            schema_version: 1,
+            entries: BTreeMap::new(),
+        },
+        lock_path: dir.path().join("android-manager.lock.json"),
+        backend: MemoryDevice::new(empty_snapshot()),
+        inspector: Box::new(inspector),
+        store: HashingStore::new(dir.path().join("cache")),
+        state_dir: dir.path().join("state"),
+        confirmer: Box::new(AutoConfirmer),
+        fetcher: Box::new(StaticFetcher {
+            index: android_manager_provider_fdroid::IndexV1 {
+                apps: vec![android_manager_provider_fdroid::IndexApp {
+                    package_name: "org.example.app".into(),
+                    suggested_version_code: Some("10".into()),
+                }],
+                packages: BTreeMap::from([(
+                    "org.example.app".into(),
+                    vec![android_manager_provider_fdroid::IndexPackage {
+                        apk_name: "org.example.app_10.apk".into(),
+                        hash: "aaa".into(),
+                        hash_type: Some("sha256".into()),
+                        version_code: 10,
+                        version_name: Some("1.0".into()),
+                        signer: Some("abcd".into()),
+                        nativecode: vec!["arm64-v8a".into()],
+                        min_sdk_version: Some(28),
+                        size: Some(4),
+                    }],
+                )]),
+                ..Default::default()
+            },
+        }),
+    };
+    let lock = runtime.lock().unwrap();
+    let entry = lock
+        .entries
+        .get("fdroid:https://f-droid.org/repo:org.example.app")
+        .unwrap();
+    assert_eq!(entry.version_code, 10);
+    assert_eq!(
+        entry.artifacts[0].url.as_deref(),
+        Some("https://f-droid.org/repo/org.example.app_10.apk")
+    );
 }

@@ -3,12 +3,14 @@ pub use android_manager_artifact::{
 };
 pub use android_manager_device_adb::{AdbBackend, DeviceBackend, MemoryDevice, SystemRunner};
 pub use android_manager_model::{ExecutionPlan, Manifest};
+pub use android_manager_provider_fdroid::{IndexFetcher, LiveJarFetcher, StaticFetcher};
 
 use android_manager_engine::plan_device;
 use android_manager_model::{
     lock_key, render_plan_json, ChangeKind, LockFile, ManagementMode, PolicyDecision,
     SCHEMA_VERSION,
 };
+use android_manager_provider_fdroid::resolve as resolve_fdroid;
 use android_manager_provider_release::resolve_host_app;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -72,6 +74,7 @@ pub struct Runtime<B> {
     pub store: HashingStore,
     pub state_dir: PathBuf,
     pub confirmer: Box<dyn Confirmer>,
+    pub fetcher: Box<dyn IndexFetcher>,
 }
 
 impl<B: DeviceBackend> Runtime<B> {
@@ -106,6 +109,7 @@ impl<B: DeviceBackend> Runtime<B> {
             store: HashingStore::new(cache_dir),
             state_dir,
             confirmer: Box::new(TypedConfirmer),
+            fetcher: Box::new(LiveJarFetcher),
         })
     }
 
@@ -115,7 +119,12 @@ impl<B: DeviceBackend> Runtime<B> {
                 if app.management != ManagementMode::Host || app.source.is_none() {
                     continue;
                 }
-                let (key, entry) = resolve_host_app(package_name, app, self.inspector.as_ref())?;
+                let (key, entry) = resolve_app(
+                    package_name,
+                    app,
+                    self.inspector.as_ref(),
+                    self.fetcher.as_ref(),
+                )?;
                 self.lock.entries.insert(key, entry);
             }
         }
@@ -311,6 +320,24 @@ fn default_cache_dir() -> PathBuf {
         .join("android-manager")
 }
 
+fn resolve_app(
+    package_name: &str,
+    app: &android_manager_model::DesiredApp,
+    inspector: &dyn ArtifactInspector,
+    fetcher: &dyn IndexFetcher,
+) -> Result<(String, android_manager_model::LockEntry)> {
+    let kind = app
+        .source
+        .as_ref()
+        .map(|source| source.kind.as_str())
+        .unwrap_or_default();
+    match kind {
+        "local" | "http" => resolve_host_app(package_name, app, inspector),
+        "fdroid" => resolve_fdroid(package_name, app, fetcher),
+        other => bail!("provider {other} is not implemented"),
+    }
+}
+
 fn user_id_from_resource(resource: &str) -> Result<u32> {
     resource
         .split('/')
@@ -359,6 +386,7 @@ pub fn lock_key_for_tests(source_kind: &str, package: &str) -> String {
             url: None,
             sha256: None,
             repository: None,
+            identity: None,
             channel: None,
         },
         package,

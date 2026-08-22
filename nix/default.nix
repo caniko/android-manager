@@ -12,8 +12,8 @@ nix-manager-core.lib.mkManagerOutputs {
   inherit self nixpkgs rs-harbor rust-overlay treefmt-nix git-hooks;
   crateName = "android-manager";
   srcDir = ../.;
-  extraRuntimePackages = pkgs: [pkgs.android-tools];
-  extraDevShellPackages = pkgs: [pkgs.android-tools];
+  extraRuntimePackages = pkgs: [pkgs.android-tools pkgs.curl pkgs.openssl pkgs.unzip];
+  extraDevShellPackages = pkgs: [pkgs.android-tools pkgs.curl pkgs.openssl pkgs.unzip];
   extraOutputs = {
     self,
     lib,
@@ -78,6 +78,13 @@ nix-manager-core.lib.mkManagerOutputs {
                     type = "local";
                     path = "${fixtureApk}";
                     sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+                  };
+                };
+                apps."org.fdroid.fdroid" = {
+                  source = {
+                    type = "fdroid";
+                    repository = "https://f-droid.org/repo";
+                    identity = "sha256:deadbeef";
                   };
                 };
               };

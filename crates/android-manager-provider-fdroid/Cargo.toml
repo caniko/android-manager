@@ -1,6 +1,6 @@
 [package]
 name = "android-manager-provider-fdroid"
-description = "Verified F-Droid provider (stub until Phase 2)"
+description = "Verified F-Droid provider"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,3 +9,9 @@ authors.workspace = true
 
 [dependencies]
 android-manager-model.workspace = true
+anyhow.workspace = true
+nix-manager-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true

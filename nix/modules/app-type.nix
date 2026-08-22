@@ -30,6 +30,10 @@
             type = lib.types.nullOr lib.types.str;
             default = null;
           };
+          identity = lib.mkOption {
+            type = lib.types.nullOr lib.types.str;
+            default = null;
+          };
           channel = lib.mkOption {
             type = lib.types.nullOr lib.types.str;
             default = null;
@@ -74,7 +78,7 @@
           if config.source.path == null
           then null
           else "${config.source.path}";
-        inherit (config.source) url sha256 repository channel;
+        inherit (config.source) url sha256 repository identity channel;
       };
     verification = {
       inherit (config.verification) requireSignerPin requirePackageNameMatch;

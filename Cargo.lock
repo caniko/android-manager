@@ -70,6 +70,12 @@ name = "android-manager-provider-fdroid"
 version = "0.1.0"
 dependencies = [
  "android-manager-model",
+ "anyhow",
+ "nix-manager-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]
@@ -90,6 +96,7 @@ dependencies = [
  "android-manager-device-adb",
  "android-manager-engine",
  "android-manager-model",
+ "android-manager-provider-fdroid",
  "android-manager-provider-release",
  "anyhow",
  "nix-manager-core",
