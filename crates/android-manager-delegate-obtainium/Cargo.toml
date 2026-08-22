@@ -1,6 +1,6 @@
 [package]
 name = "android-manager-delegate-obtainium"
-description = "Obtainium delegate backend (stub until Phase 4)"
+description = "Obtainium export and delegated-install instructions"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,3 +9,6 @@ authors.workspace = true
 
 [dependencies]
 android-manager-model.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true

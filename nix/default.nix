@@ -94,6 +94,13 @@ nix-manager-core.lib.mkManagerOutputs {
                     channel = "latest";
                   };
                 };
+                apps."org.example.obtainium" = {
+                  management = "delegated";
+                  source = {
+                    type = "obtainium";
+                    url = "https://github.com/example/app";
+                  };
+                };
               };
             };
           })

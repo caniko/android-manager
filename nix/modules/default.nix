@@ -9,6 +9,7 @@
     ./providers/http.nix
     ./providers/fdroid.nix
     ./providers/github.nix
+    ./providers/obtainium.nix
     ./resources/packages.nix
   ];
 }

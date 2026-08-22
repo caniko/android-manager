@@ -27,6 +27,9 @@ name = "android-manager-delegate-obtainium"
 version = "0.1.0"
 dependencies = [
  "android-manager-model",
+ "anyhow",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -42,6 +45,7 @@ dependencies = [
 name = "android-manager-engine"
 version = "0.1.0"
 dependencies = [
+ "android-manager-delegate-obtainium",
  "android-manager-model",
  "anyhow",
  "serde",

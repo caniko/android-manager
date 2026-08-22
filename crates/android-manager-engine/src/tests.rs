@@ -271,6 +271,78 @@ fn delegated_missing_is_manual() {
 }
 
 #[test]
+fn obtainium_missing_names_source_and_asks_for_obtainium() {
+    let pkg = "org.example.app";
+    let app = DesiredApp {
+        state: AppState::Present,
+        management: ManagementMode::Delegated,
+        source: Some(SourceIntent {
+            kind: "obtainium".into(),
+            path: None,
+            url: Some("https://github.com/ex/app".into()),
+            sha256: None,
+            repository: None,
+            identity: None,
+            channel: None,
+        }),
+        version_policy: VersionPolicy::Presence,
+        verification: Verification {
+            require_signer_pin: false,
+            require_package_name_match: true,
+        },
+    };
+    let result = plan(
+        BTreeMap::from([(pkg.into(), app)]),
+        LockFile::default(),
+        vec![],
+    );
+    assert_eq!(result.changes.len(), 2);
+    assert!(result
+        .changes
+        .iter()
+        .any(|change| change.summary.contains("Install Obtainium")));
+    assert!(result
+        .changes
+        .iter()
+        .any(|change| change.summary.contains("https://github.com/ex/app")));
+}
+
+#[test]
+fn obtainium_present_only_asks_for_app() {
+    let pkg = "org.example.app";
+    let app = DesiredApp {
+        state: AppState::Present,
+        management: ManagementMode::Delegated,
+        source: Some(SourceIntent {
+            kind: "obtainium".into(),
+            path: None,
+            url: Some("https://github.com/ex/app".into()),
+            sha256: None,
+            repository: None,
+            identity: None,
+            channel: None,
+        }),
+        version_policy: VersionPolicy::Presence,
+        verification: Verification {
+            require_signer_pin: false,
+            require_package_name_match: true,
+        },
+    };
+    let result = plan(
+        BTreeMap::from([(pkg.into(), app)]),
+        LockFile::default(),
+        vec![installed(
+            android_manager_delegate_obtainium::OBTAINIUM_PACKAGE,
+            1,
+            "sha256:aa",
+            0,
+        )],
+    );
+    assert_eq!(result.changes.len(), 1);
+    assert!(result.changes[0].summary.contains(pkg));
+}
+
+#[test]
 fn applying_install_to_model_yields_empty_second_plan() {
     let pkg = "org.example.app";
     let desired = device(BTreeMap::from([(pkg.into(), host_app("local"))]));

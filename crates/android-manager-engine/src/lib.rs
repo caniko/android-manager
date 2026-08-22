@@ -1,3 +1,6 @@
+use android_manager_delegate_obtainium::{
+    instruction as obtainium_instruction, obtainium_install_instruction, OBTAINIUM_PACKAGE,
+};
 use android_manager_model::{
     lock_key, manual_resource_id, package_resource_id, AppState, ChangeKind, DesiredApp,
     DesiredDevice, ExecutionPlan, InstalledPackage, LockEntry, LockFile, ManagementMode, Operation,
@@ -46,6 +49,22 @@ pub fn plan_device(
                 AppPlan::Warning(message) => warnings.push(message),
                 AppPlan::None => {}
             }
+        }
+    }
+
+    if let Some(user_id) = obtainium_required_user(desired) {
+        let installed = snapshot
+            .packages
+            .iter()
+            .any(|pkg| pkg.name == OBTAINIUM_PACKAGE && pkg.user_id == user_id);
+        if !installed {
+            changes.push(manual(
+                desired,
+                user_id,
+                OBTAINIUM_PACKAGE,
+                &desired.policies,
+                obtainium_install_instruction(),
+            ));
         }
     }
 
@@ -109,7 +128,7 @@ fn plan_app(
                 user_id,
                 package_name,
                 &desired.policies,
-                format!("Install {package_name} through its delegated or manual source"),
+                delegated_instruction(package_name, app),
             )));
         }
         ManagementMode::Observe => {
@@ -443,6 +462,29 @@ fn blocked(
             reason: "blocked".into(),
         },
     }
+}
+
+fn delegated_instruction(package_name: &str, app: &DesiredApp) -> String {
+    match app.source.as_ref() {
+        Some(source) if source.kind == "obtainium" => obtainium_instruction(package_name, source),
+        _ => format!("Install {package_name} through its delegated or manual source"),
+    }
+}
+
+fn obtainium_required_user(desired: &DesiredDevice) -> Option<u32> {
+    desired.users.values().find_map(|user| {
+        user.apps
+            .values()
+            .any(|app| {
+                app.state == AppState::Present
+                    && app.management == ManagementMode::Delegated
+                    && app
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| source.kind == "obtainium")
+            })
+            .then_some(user.android_user_id)
+    })
 }
 
 fn declared_packages(desired: &DesiredDevice) -> BTreeSet<String> {
