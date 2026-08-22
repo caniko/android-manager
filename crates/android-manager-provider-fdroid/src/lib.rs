@@ -1,21 +1,68 @@
+use android_manager_adapter::{
+    AdapterError, AdapterErrorCode, AdapterResult, ResolveRequest, SourceProvider,
+};
 use android_manager_model::{
-    lock_key, Constraints, DesiredApp, LockEntry, LockedArtifact, LockedSource,
-    ProviderCapabilities, SourceIntent,
+    lock_key, AdapterCapability, AdapterDescriptor, AdapterKind, Constraints, DesiredApp,
+    LockEntry, LockedArtifact, LockedSource, SourceIntent,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-pub fn capabilities() -> ProviderCapabilities {
-    ProviderCapabilities {
-        immutable_resolution: false,
-        signed_metadata: true,
-        multi_artifact: true,
-        requires_authentication: false,
-        supports_offline_realization: false,
+pub struct FdroidProvider {
+    fetcher: Arc<dyn IndexFetcher>,
+}
+
+impl FdroidProvider {
+    pub fn new(fetcher: Arc<dyn IndexFetcher>) -> Self {
+        Self { fetcher }
+    }
+}
+
+impl SourceProvider for FdroidProvider {
+    fn descriptor(&self) -> AdapterDescriptor {
+        AdapterDescriptor {
+            id: "fdroid".into(),
+            kind: AdapterKind::Source,
+            capabilities: BTreeSet::from([AdapterCapability::Resolve]),
+        }
+    }
+
+    fn validate_config(&self, source: &SourceIntent) -> AdapterResult<()> {
+        if source.identity.is_none() {
+            return Err(AdapterError::new(
+                AdapterErrorCode::InvalidConfiguration,
+                "fdroid",
+                "fdroid source requires identity",
+            ));
+        }
+        Ok(())
+    }
+
+    fn supports(&self, source: &SourceIntent) -> bool {
+        source.kind == "fdroid"
+    }
+
+    fn resolve(&self, request: ResolveRequest<'_>) -> AdapterResult<(String, LockEntry)> {
+        let source = request.app.source.as_ref().ok_or_else(|| {
+            AdapterError::new(
+                AdapterErrorCode::InvalidConfiguration,
+                "fdroid",
+                format!("{} has no source", request.package_name),
+            )
+        })?;
+        self.validate_config(source)?;
+        resolve(request.package_name, request.app, self.fetcher.as_ref()).map_err(|error| {
+            AdapterError::new(
+                AdapterErrorCode::ResolutionFailed,
+                "fdroid",
+                error.to_string(),
+            )
+        })
     }
 }
 
@@ -169,6 +216,7 @@ pub fn resolve_from_index(
             url: Some(repository.to_string()),
             repository: Some(repository.to_string()),
             repository_identity: Some(identity.to_string()),
+            adapter: None,
         },
         package_name: package_name.to_string(),
         version_name: apk.version_name.clone(),
@@ -459,18 +507,14 @@ mod tests {
     }
 
     fn app(channel: Option<&str>) -> DesiredApp {
+        let mut source = SourceIntent::new("fdroid");
+        source.repository = Some("https://f-droid.org/repo".into());
+        source.identity = Some("sha256:deadbeef".into());
+        source.channel = channel.map(ToOwned::to_owned);
         DesiredApp {
             state: AppState::Present,
             management: ManagementMode::Host,
-            source: Some(SourceIntent {
-                kind: "fdroid".into(),
-                path: None,
-                url: None,
-                sha256: None,
-                repository: Some("https://f-droid.org/repo".into()),
-                identity: Some("sha256:deadbeef".into()),
-                channel: channel.map(ToOwned::to_owned),
-            }),
+            source: Some(source),
             version_policy: VersionPolicy::LockedUpgradeOnly,
             verification: Verification::default(),
         }

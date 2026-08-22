@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "crates/android-manager-model",
+  "crates/android-manager-adapter",
   "crates/android-manager-engine",
   "crates/android-manager-artifact",
   "crates/android-manager-provider-release",
@@ -11,6 +12,7 @@ members = [
   "crates/android-manager-plugin-protocol",
   "crates/android-manager-runtime",
   "crates/android-manager-cli",
+  "crates/android-manager-fixture-adapter",
 ]
 
 [workspace.package]
@@ -22,6 +24,7 @@ authors = ["caniko"]
 
 [workspace.dependencies]
 android-manager-model = { path = "crates/android-manager-model" }
+android-manager-adapter = { path = "crates/android-manager-adapter" }
 android-manager-engine = { path = "crates/android-manager-engine" }
 android-manager-artifact = { path = "crates/android-manager-artifact" }
 android-manager-provider-release = { path = "crates/android-manager-provider-release" }
@@ -37,6 +40,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 tempfile = "3"
+libc = "0.2"
 
 [workspace.metadata.crane]
 name = "android-manager"

@@ -13,6 +13,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "android-manager-adapter"
+version = "0.1.0"
+dependencies = [
+ "android-manager-model",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "android-manager-artifact"
 version = "0.1.0"
 dependencies = [
@@ -20,16 +29,16 @@ dependencies = [
  "anyhow",
  "nix-manager-core",
  "sha2",
+ "tempfile",
 ]
 
 [[package]]
 name = "android-manager-delegate-obtainium"
 version = "0.1.0"
 dependencies = [
+ "android-manager-adapter",
  "android-manager-model",
  "anyhow",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -45,10 +54,22 @@ dependencies = [
 name = "android-manager-engine"
 version = "0.1.0"
 dependencies = [
- "android-manager-delegate-obtainium",
  "android-manager-model",
  "anyhow",
- "serde",
+]
+
+[[package]]
+name = "android-manager-fixture-adapter"
+version = "0.1.0"
+dependencies = [
+ "android-manager-artifact",
+ "android-manager-model",
+ "android-manager-plugin-protocol",
+ "android-manager-provider-fdroid",
+ "android-manager-provider-release",
+ "android-manager-runtime",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -64,7 +85,9 @@ dependencies = [
 name = "android-manager-plugin-protocol"
 version = "0.1.0"
 dependencies = [
+ "android-manager-adapter",
  "android-manager-model",
+ "libc",
  "serde",
  "serde_json",
 ]
@@ -73,6 +96,7 @@ dependencies = [
 name = "android-manager-provider-fdroid"
 version = "0.1.0"
 dependencies = [
+ "android-manager-adapter",
  "android-manager-model",
  "anyhow",
  "nix-manager-core",
@@ -86,6 +110,7 @@ dependencies = [
 name = "android-manager-provider-release"
 version = "0.1.0"
 dependencies = [
+ "android-manager-adapter",
  "android-manager-artifact",
  "android-manager-model",
  "anyhow",
@@ -99,10 +124,13 @@ dependencies = [
 name = "android-manager-runtime"
 version = "0.1.0"
 dependencies = [
+ "android-manager-adapter",
  "android-manager-artifact",
+ "android-manager-delegate-obtainium",
  "android-manager-device-adb",
  "android-manager-engine",
  "android-manager-model",
+ "android-manager-plugin-protocol",
  "android-manager-provider-fdroid",
  "android-manager-provider-release",
  "anyhow",
@@ -961,9 +989,9 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
 name = "log"
-version = "0.4.33"
+version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
+checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "lru-slab"

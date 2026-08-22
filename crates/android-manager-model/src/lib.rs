@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::error::Error;
+use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
 
 pub const SCHEMA_VERSION: u32 = 1;
@@ -8,6 +10,13 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+pub fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 pub fn canonical_json<T: Serialize>(value: &T) -> Result<String, serde_json::Error> {
@@ -28,6 +37,8 @@ pub struct Manifest {
     pub lock_path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub realized_artifacts: BTreeMap<String, PathBuf>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub adapters: BTreeMap<String, ExternalAdapter>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,6 +146,77 @@ pub struct SourceIntent {
     pub identity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub config: BTreeMap<String, serde_json::Value>,
+}
+
+impl SourceIntent {
+    pub fn new(kind: impl Into<String>) -> Self {
+        Self {
+            kind: kind.into(),
+            path: None,
+            url: None,
+            sha256: None,
+            repository: None,
+            identity: None,
+            channel: None,
+            adapter: None,
+            config: BTreeMap::new(),
+        }
+    }
+
+    pub fn provider_id(&self) -> Option<&str> {
+        if self.kind == "external" {
+            self.adapter.as_deref()
+        } else {
+            Some(&self.kind)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AdapterKind {
+    Source,
+    Delegate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AdapterCapability {
+    Resolve,
+    PlanDelegate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdapterDescriptor {
+    pub id: String,
+    pub kind: AdapterKind,
+    pub capabilities: BTreeSet<AdapterCapability>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalAdapter {
+    pub kind: AdapterKind,
+    pub executable: PathBuf,
+    pub capabilities: BTreeSet<AdapterCapability>,
+    #[serde(default)]
+    pub environment: AdapterEnvironment,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub config: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdapterEnvironment {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub files: BTreeMap<String, PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -237,6 +319,8 @@ pub struct LockedSource {
     pub repository: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,16 +396,6 @@ impl Default for DeviceCapabilities {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProviderCapabilities {
-    pub immutable_resolution: bool,
-    pub signed_metadata: bool,
-    pub multi_artifact: bool,
-    pub requires_authentication: bool,
-    pub supports_offline_realization: bool,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionPlan {
@@ -358,6 +432,39 @@ pub struct PlannedChange {
     pub operation: Operation,
     pub risk: Risk,
     pub policy: PolicyDecision,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DelegatePlan {
+    pub action: DelegatedAction,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prerequisites: Vec<PrerequisiteResource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum DelegateOutcome {
+    Planned { plan: DelegatePlan },
+    Blocked { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DelegatedAction {
+    pub resource: String,
+    pub instruction: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrerequisiteResource {
+    pub resource: String,
+    pub instruction: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -382,12 +489,16 @@ pub enum Operation {
     Install {
         package_name: String,
         version_code: i64,
+        #[serde(default)]
+        signers: Vec<String>,
         artifact_paths: Vec<PathBuf>,
     },
     Upgrade {
         package_name: String,
         from: i64,
         to: i64,
+        #[serde(default)]
+        signers: Vec<String>,
         artifact_paths: Vec<PathBuf>,
     },
     Uninstall {
@@ -437,7 +548,111 @@ pub fn lock_key(source: &SourceIntent, package: &str) -> String {
             "github:{}:{package}",
             source.repository.as_deref().unwrap_or("unknown")
         ),
+        "external" => format!(
+            "external:{}:{package}",
+            source.adapter.as_deref().unwrap_or("unknown")
+        ),
         other => format!("{other}:{package}"),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanDependencyError {
+    DuplicateResource(String),
+    MissingDependency {
+        resource: String,
+        dependency: String,
+    },
+    Cycle(Vec<String>),
+}
+
+impl Display for PlanDependencyError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DuplicateResource(resource) => {
+                write!(formatter, "duplicate plan resource {resource}")
+            }
+            Self::MissingDependency {
+                resource,
+                dependency,
+            } => {
+                write!(
+                    formatter,
+                    "plan resource {resource} depends on missing {dependency}"
+                )
+            }
+            Self::Cycle(resources) => {
+                write!(formatter, "plan dependency cycle: {}", resources.join(", "))
+            }
+        }
+    }
+}
+
+impl Error for PlanDependencyError {}
+
+pub fn order_changes(
+    changes: Vec<PlannedChange>,
+) -> Result<Vec<PlannedChange>, PlanDependencyError> {
+    let mut by_resource = BTreeMap::new();
+    for mut change in changes {
+        change.depends_on.sort();
+        change.depends_on.dedup();
+        let resource = change.resource.clone();
+        if by_resource.insert(resource.clone(), change).is_some() {
+            return Err(PlanDependencyError::DuplicateResource(resource));
+        }
+    }
+    let mut indegree = BTreeMap::new();
+    let mut dependents: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (resource, change) in &by_resource {
+        indegree.insert(resource.clone(), change.depends_on.len());
+        for dependency in &change.depends_on {
+            if !by_resource.contains_key(dependency) {
+                return Err(PlanDependencyError::MissingDependency {
+                    resource: resource.clone(),
+                    dependency: dependency.clone(),
+                });
+            }
+            dependents
+                .entry(dependency.clone())
+                .or_default()
+                .push(resource.clone());
+        }
+    }
+    let mut ready: BTreeSet<(u8, String)> = indegree
+        .iter()
+        .filter(|(_, count)| **count == 0)
+        .map(|(resource, _)| (change_rank(by_resource[resource].kind), resource.clone()))
+        .collect();
+    let mut ordered = Vec::with_capacity(by_resource.len());
+    while let Some((_, resource)) = ready.pop_first() {
+        let change = by_resource
+            .remove(&resource)
+            .expect("ready resource exists");
+        ordered.push(change);
+        for dependent in dependents.get(&resource).into_iter().flatten() {
+            let count = indegree
+                .get_mut(dependent)
+                .expect("dependent indegree exists");
+            *count -= 1;
+            if *count == 0 {
+                ready.insert((change_rank(by_resource[dependent].kind), dependent.clone()));
+            }
+        }
+    }
+    if !by_resource.is_empty() {
+        return Err(PlanDependencyError::Cycle(
+            by_resource.into_keys().collect(),
+        ));
+    }
+    Ok(ordered)
+}
+
+fn change_rank(kind: ChangeKind) -> u8 {
+    match kind {
+        ChangeKind::Create | ChangeKind::Update => 0,
+        ChangeKind::Remove => 1,
+        ChangeKind::Manual | ChangeKind::Blocked => 2,
     }
 }
 
@@ -470,5 +685,94 @@ mod tests {
         })
         .unwrap();
         assert_eq!(first, second);
+    }
+
+    fn manual(resource: &str, depends_on: &[&str]) -> PlannedChange {
+        PlannedChange {
+            resource: resource.into(),
+            kind: ChangeKind::Manual,
+            summary: resource.into(),
+            operation: Operation::Manual {
+                instruction: resource.into(),
+            },
+            risk: Risk::Low,
+            policy: PolicyDecision::Manual {
+                reason: resource.into(),
+            },
+            depends_on: depends_on.iter().map(|value| (*value).into()).collect(),
+        }
+    }
+
+    #[test]
+    fn dependencies_have_stable_topological_order() {
+        let first =
+            order_changes(vec![manual("app", &["manager"]), manual("manager", &[])]).unwrap();
+        let second =
+            order_changes(vec![manual("manager", &[]), manual("app", &["manager"])]).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first[0].resource, "manager");
+    }
+
+    #[test]
+    fn dependency_cycle_is_rejected() {
+        let error = order_changes(vec![manual("a", &["b"]), manual("b", &["a"])]).unwrap_err();
+        assert_eq!(
+            error,
+            PlanDependencyError::Cycle(vec!["a".into(), "b".into()])
+        );
+    }
+
+    #[test]
+    fn phase_one_json_remains_readable() {
+        let manifest = r#"{
+          "schemaVersion": 1,
+          "device": {
+            "name": "phone",
+            "transport": {"type": "adb", "selector": {}},
+            "users": {"owner": {"androidUserId": 0, "apps": {}}}
+          }
+        }"#;
+        let parsed: Manifest = serde_json::from_str(manifest).unwrap();
+        assert!(parsed.adapters.is_empty());
+
+        let lock = r#"{
+          "schemaVersion": 1,
+          "entries": {
+            "local:org.example.app": {
+              "source": {"type": "local", "path": "/tmp/app.apk"},
+              "packageName": "org.example.app",
+              "versionCode": 1,
+              "signers": ["sha256:aa"],
+              "artifacts": [{"kind": "apk", "path": "/tmp/app.apk", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]
+            }
+          }
+        }"#;
+        let parsed: LockFile = serde_json::from_str(lock).unwrap();
+        assert!(parsed
+            .entries
+            .values()
+            .next()
+            .unwrap()
+            .source
+            .adapter
+            .is_none());
+
+        let plan = r#"{
+          "schemaVersion": 1,
+          "configDigest": "a",
+          "lockDigest": "b",
+          "deviceBinding": "adb:test",
+          "snapshotDigest": "c",
+          "changes": [{
+            "resource": "device/phone/user/0/package/org.example.app",
+            "kind": "create",
+            "summary": "install",
+            "operation": {"type": "install", "package_name": "org.example.app", "version_code": 1, "artifact_paths": ["/tmp/app.apk"]},
+            "risk": "medium",
+            "policy": {"decision": "allow"}
+          }]
+        }"#;
+        let parsed: ExecutionPlan = serde_json::from_str(plan).unwrap();
+        assert!(parsed.changes[0].depends_on.is_empty());
     }
 }

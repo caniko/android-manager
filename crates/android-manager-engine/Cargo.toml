@@ -8,7 +8,5 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-android-manager-delegate-obtainium.workspace = true
 android-manager-model.workspace = true
 anyhow.workspace = true
-serde.workspace = true

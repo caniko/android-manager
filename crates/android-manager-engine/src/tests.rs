@@ -1,7 +1,8 @@
 use super::*;
 use android_manager_model::{
-    Constraints, DesiredUser, DeviceCapabilities, DeviceSelector, DeviceSnapshot, ExpectedDevice,
-    LockedArtifact, LockedSource, SourceIntent, Transport, Verification,
+    Constraints, DelegateOutcome, DelegatePlan, DelegatedAction, DesiredUser, DeviceCapabilities,
+    DeviceSelector, DeviceSnapshot, ExpectedDevice, LockedArtifact, LockedSource,
+    PrerequisiteResource, SourceIntent, Transport, Verification,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -28,18 +29,13 @@ fn device(apps: BTreeMap<String, DesiredApp>) -> DesiredDevice {
 }
 
 fn host_app(kind: &str) -> DesiredApp {
+    let mut source = SourceIntent::new(kind);
+    source.path = Some(PathBuf::from("/tmp/app.apk"));
+    source.sha256 = Some("abc".into());
     DesiredApp {
         state: AppState::Present,
         management: ManagementMode::Host,
-        source: Some(SourceIntent {
-            kind: kind.into(),
-            path: Some(PathBuf::from("/tmp/app.apk")),
-            url: None,
-            sha256: Some("abc".into()),
-            repository: None,
-            identity: None,
-            channel: None,
-        }),
+        source: Some(source),
         version_policy: VersionPolicy::LockedUpgradeOnly,
         verification: Verification::default(),
     }
@@ -58,6 +54,7 @@ fn lock_file(package: &str, version_code: i64, signers: &[&str], abis: &[&str]) 
                     url: None,
                     repository: None,
                     repository_identity: None,
+                    adapter: None,
                 },
                 package_name: package.into(),
                 version_name: Some("1.0".into()),
@@ -107,6 +104,44 @@ fn plan(
     packages: Vec<InstalledPackage>,
 ) -> ExecutionPlan {
     plan_device(&device(apps), &locks, &snapshot(packages), &BTreeMap::new()).unwrap()
+}
+
+fn delegated_app(kind: &str) -> DesiredApp {
+    DesiredApp {
+        state: AppState::Present,
+        management: ManagementMode::Delegated,
+        source: Some(SourceIntent::new(kind)),
+        version_policy: VersionPolicy::Presence,
+        verification: Verification::default(),
+    }
+}
+
+fn delegate_outcome(
+    package: &str,
+    prerequisite: Option<&str>,
+) -> BTreeMap<String, DelegateOutcome> {
+    let resource = manual_resource_id("pixel10", 0, package);
+    let prerequisites = prerequisite
+        .map(|dependency| {
+            vec![PrerequisiteResource {
+                resource: dependency.into(),
+                instruction: "Install delegate manager".into(),
+            }]
+        })
+        .unwrap_or_default();
+    BTreeMap::from([(
+        resource.clone(),
+        DelegateOutcome::Planned {
+            plan: DelegatePlan {
+                action: DelegatedAction {
+                    resource,
+                    instruction: format!("Delegate {package}"),
+                    depends_on: prerequisite.into_iter().map(str::to_string).collect(),
+                },
+                prerequisites,
+            },
+        },
+    )])
 }
 
 #[test]
@@ -244,102 +279,76 @@ fn explicit_removal_requires_confirmation() {
 #[test]
 fn delegated_missing_is_manual() {
     let pkg = "com.revolut.revolut";
-    let app = DesiredApp {
-        state: AppState::Present,
-        management: ManagementMode::Delegated,
-        source: Some(SourceIntent {
-            kind: "play".into(),
-            path: None,
-            url: None,
-            sha256: None,
-            repository: None,
-            identity: None,
-            channel: None,
-        }),
-        version_policy: VersionPolicy::Minimum,
-        verification: Verification {
-            require_signer_pin: false,
-            require_package_name_match: true,
-        },
-    };
-    let result = plan(
-        BTreeMap::from([(pkg.into(), app)]),
-        LockFile::default(),
-        vec![],
-    );
+    let desired = device(BTreeMap::from([(pkg.into(), delegated_app("delegate"))]));
+    let result = plan_device_with_delegates(
+        &desired,
+        &LockFile::default(),
+        &snapshot(Vec::new()),
+        &BTreeMap::new(),
+        &delegate_outcome(pkg, None),
+    )
+    .unwrap();
     assert_eq!(result.changes[0].kind, ChangeKind::Manual);
 }
 
 #[test]
-fn obtainium_missing_names_source_and_asks_for_obtainium() {
+fn delegated_prerequisite_is_explicitly_ordered() {
     let pkg = "org.example.app";
-    let app = DesiredApp {
-        state: AppState::Present,
-        management: ManagementMode::Delegated,
-        source: Some(SourceIntent {
-            kind: "obtainium".into(),
-            path: None,
-            url: Some("https://github.com/ex/app".into()),
-            sha256: None,
-            repository: None,
-            identity: None,
-            channel: None,
-        }),
-        version_policy: VersionPolicy::Presence,
-        verification: Verification {
-            require_signer_pin: false,
-            require_package_name_match: true,
-        },
-    };
-    let result = plan(
-        BTreeMap::from([(pkg.into(), app)]),
-        LockFile::default(),
-        vec![],
-    );
+    let prerequisite = manual_resource_id("pixel10", 0, "delegate.manager");
+    let desired = device(BTreeMap::from([(pkg.into(), delegated_app("delegate"))]));
+    let result = plan_device_with_delegates(
+        &desired,
+        &LockFile::default(),
+        &snapshot(Vec::new()),
+        &BTreeMap::new(),
+        &delegate_outcome(pkg, Some(&prerequisite)),
+    )
+    .unwrap();
     assert_eq!(result.changes.len(), 2);
-    assert!(result
-        .changes
-        .iter()
-        .any(|change| change.summary.contains("Install Obtainium")));
-    assert!(result
-        .changes
-        .iter()
-        .any(|change| change.summary.contains("https://github.com/ex/app")));
+    assert_eq!(result.changes[0].resource, prerequisite);
+    assert_eq!(
+        result.changes[1].depends_on,
+        [result.changes[0].resource.clone()]
+    );
 }
 
 #[test]
-fn obtainium_present_only_asks_for_app() {
+fn managed_package_satisfies_delegate_prerequisite() {
+    let manager = "dev.imranr.obtainium";
+    let delegated = "org.example.app";
+    let dependency = package_resource_id("pixel10", 0, manager);
+    let apps = BTreeMap::from([
+        (manager.into(), host_app("local")),
+        (delegated.into(), delegated_app("obtainium")),
+    ]);
+    let result = plan_device_with_delegates(
+        &device(apps),
+        &lock_file(manager, 10, &["sha256:aa"], &["arm64-v8a"]),
+        &snapshot(Vec::new()),
+        &BTreeMap::new(),
+        &delegate_outcome(delegated, Some(&dependency)),
+    )
+    .unwrap();
+
+    assert_eq!(result.changes.len(), 2);
+    assert_eq!(result.changes[0].resource, dependency);
+    assert_eq!(result.changes[0].kind, ChangeKind::Create);
+    assert_eq!(result.changes[1].depends_on, [dependency]);
+}
+
+#[test]
+fn missing_delegate_plan_is_blocked() {
     let pkg = "org.example.app";
-    let app = DesiredApp {
-        state: AppState::Present,
-        management: ManagementMode::Delegated,
-        source: Some(SourceIntent {
-            kind: "obtainium".into(),
-            path: None,
-            url: Some("https://github.com/ex/app".into()),
-            sha256: None,
-            repository: None,
-            identity: None,
-            channel: None,
-        }),
-        version_policy: VersionPolicy::Presence,
-        verification: Verification {
-            require_signer_pin: false,
-            require_package_name_match: true,
-        },
-    };
-    let result = plan(
-        BTreeMap::from([(pkg.into(), app)]),
-        LockFile::default(),
-        vec![installed(
-            android_manager_delegate_obtainium::OBTAINIUM_PACKAGE,
-            1,
-            "sha256:aa",
-            0,
-        )],
-    );
+    let result = plan_device_with_delegates(
+        &device(BTreeMap::from([(pkg.into(), delegated_app("delegate"))])),
+        &LockFile::default(),
+        &snapshot(Vec::new()),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    )
+    .unwrap();
     assert_eq!(result.changes.len(), 1);
-    assert!(result.changes[0].summary.contains(pkg));
+    assert_eq!(result.changes[0].kind, ChangeKind::Blocked);
 }
 
 #[test]

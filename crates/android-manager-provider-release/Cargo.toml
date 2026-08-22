@@ -8,6 +8,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+android-manager-adapter.workspace = true
 android-manager-artifact.workspace = true
 android-manager-model.workspace = true
 anyhow.workspace = true

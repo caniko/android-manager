@@ -1,10 +1,8 @@
-use android_manager_delegate_obtainium::{
-    instruction as obtainium_instruction, obtainium_install_instruction, OBTAINIUM_PACKAGE,
-};
 use android_manager_model::{
-    lock_key, manual_resource_id, package_resource_id, AppState, ChangeKind, DesiredApp,
-    DesiredDevice, ExecutionPlan, InstalledPackage, LockEntry, LockFile, ManagementMode, Operation,
-    PlannedChange, Policies, PolicyDecision, Risk, VersionPolicy,
+    lock_key, manual_resource_id, order_changes, package_resource_id, AppState, ChangeKind,
+    DelegateOutcome, DesiredApp, DesiredDevice, ExecutionPlan, InstalledPackage, LockEntry,
+    LockFile, ManagementMode, Operation, PlannedChange, Policies, PolicyDecision, Risk,
+    VersionPolicy,
 };
 use anyhow::{bail, Result};
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,7 +14,18 @@ pub fn plan_device(
     snapshot: &android_manager_model::DeviceSnapshot,
     realized: &BTreeMap<String, PathBuf>,
 ) -> Result<ExecutionPlan> {
+    plan_device_with_delegates(desired, locks, snapshot, realized, &BTreeMap::new())
+}
+
+pub fn plan_device_with_delegates(
+    desired: &DesiredDevice,
+    locks: &LockFile,
+    snapshot: &android_manager_model::DeviceSnapshot,
+    realized: &BTreeMap<String, PathBuf>,
+    delegates: &BTreeMap<String, DelegateOutcome>,
+) -> Result<ExecutionPlan> {
     let mut changes = Vec::new();
+    let mut prerequisites = BTreeMap::new();
     let mut warnings = Vec::new();
     let declared = declared_packages(desired);
     let mut unmanaged = Vec::new();
@@ -35,6 +44,50 @@ pub fn plan_device(
                 .packages
                 .iter()
                 .find(|pkg| pkg.name == *package_name && pkg.user_id == user.android_user_id);
+            if app.state == AppState::Present && app.management == ManagementMode::Delegated {
+                let resource =
+                    manual_resource_id(&desired.name, user.android_user_id, package_name);
+                if installed.is_none() {
+                    match delegates.get(&resource) {
+                        Some(DelegateOutcome::Planned { plan }) => {
+                            for prerequisite in &plan.prerequisites {
+                                let change = manual_resource(
+                                    prerequisite.resource.clone(),
+                                    &desired.policies,
+                                    prerequisite.instruction.clone(),
+                                    Vec::new(),
+                                );
+                                if let Some(existing) = prerequisites
+                                    .insert(prerequisite.resource.clone(), change.clone())
+                                {
+                                    if existing != change {
+                                        bail!("conflicting prerequisite {}", prerequisite.resource);
+                                    }
+                                }
+                            }
+                            changes.push(manual_resource(
+                                plan.action.resource.clone(),
+                                &desired.policies,
+                                plan.action.instruction.clone(),
+                                plan.action.depends_on.clone(),
+                            ));
+                        }
+                        Some(DelegateOutcome::Blocked { reason }) => changes.push(blocked(
+                            desired,
+                            user.android_user_id,
+                            package_name,
+                            reason.clone(),
+                        )),
+                        None => changes.push(blocked(
+                            desired,
+                            user.android_user_id,
+                            package_name,
+                            format!("missing delegate plan for {resource}"),
+                        )),
+                    }
+                }
+                continue;
+            }
             match plan_app(
                 desired,
                 locks,
@@ -51,28 +104,13 @@ pub fn plan_device(
             }
         }
     }
-
-    if let Some(user_id) = obtainium_required_user(desired) {
-        let installed = snapshot
-            .packages
-            .iter()
-            .any(|pkg| pkg.name == OBTAINIUM_PACKAGE && pkg.user_id == user_id);
-        if !installed {
-            changes.push(manual(
-                desired,
-                user_id,
-                OBTAINIUM_PACKAGE,
-                &desired.policies,
-                obtainium_install_instruction(),
-            ));
-        }
-    }
-
-    changes.sort_by(|a, b| {
-        kind_rank(a.kind)
-            .cmp(&kind_rank(b.kind))
-            .then_with(|| a.resource.cmp(&b.resource))
-    });
+    let planned_resources: BTreeSet<_> = changes
+        .iter()
+        .map(|change| change.resource.as_str())
+        .collect();
+    prerequisites.retain(|resource, _| !planned_resources.contains(resource.as_str()));
+    changes.extend(prerequisites.into_values());
+    let changes = order_changes(changes)?;
 
     Ok(ExecutionPlan {
         schema_version: android_manager_model::SCHEMA_VERSION,
@@ -84,14 +122,6 @@ pub fn plan_device(
         unmanaged,
         warnings,
     })
-}
-
-fn kind_rank(kind: ChangeKind) -> u8 {
-    match kind {
-        ChangeKind::Create | ChangeKind::Update => 0,
-        ChangeKind::Remove => 1,
-        ChangeKind::Manual | ChangeKind::Blocked => 2,
-    }
 }
 
 enum AppPlan {
@@ -119,7 +149,7 @@ fn plan_app(
     }
 
     match app.management {
-        ManagementMode::Manual | ManagementMode::Delegated => {
+        ManagementMode::Manual => {
             if installed.is_some() {
                 return Ok(AppPlan::None);
             }
@@ -128,9 +158,10 @@ fn plan_app(
                 user_id,
                 package_name,
                 &desired.policies,
-                delegated_instruction(package_name, app),
+                format!("Install {package_name} through its manual source"),
             )));
         }
+        ManagementMode::Delegated => unreachable!("delegated apps are normalized before plan_app"),
         ManagementMode::Observe => {
             if installed.is_none() {
                 return Ok(AppPlan::Warning(format!(
@@ -348,7 +379,7 @@ fn signers_match(expected: &[String], actual: &[String]) -> bool {
     if expected.is_empty() || actual.is_empty() {
         return false;
     }
-    expected.iter().any(|signer| actual.contains(signer))
+    expected.iter().collect::<BTreeSet<_>>() == actual.iter().collect::<BTreeSet<_>>()
 }
 
 fn install(
@@ -365,10 +396,12 @@ fn install(
         operation: Operation::Install {
             package_name: package_name.to_string(),
             version_code: entry.version_code,
+            signers: entry.signers.clone(),
             artifact_paths,
         },
         risk: Risk::Medium,
         policy: PolicyDecision::Allow,
+        depends_on: Vec::new(),
     }
 }
 
@@ -388,10 +421,12 @@ fn upgrade(
             package_name: package_name.to_string(),
             from,
             to: entry.version_code,
+            signers: entry.signers.clone(),
             artifact_paths,
         },
         risk: Risk::Medium,
         policy: PolicyDecision::Allow,
+        depends_on: Vec::new(),
     }
 }
 
@@ -417,6 +452,7 @@ fn removal(
         },
         risk: Risk::High,
         policy,
+        depends_on: Vec::new(),
     }
 }
 
@@ -426,6 +462,20 @@ fn manual(
     package_name: &str,
     policies: &Policies,
     instruction: String,
+) -> PlannedChange {
+    manual_resource(
+        manual_resource_id(&desired.name, user_id, package_name),
+        policies,
+        instruction,
+        Vec::new(),
+    )
+}
+
+fn manual_resource(
+    resource: String,
+    policies: &Policies,
+    instruction: String,
+    depends_on: Vec<String>,
 ) -> PlannedChange {
     let policy = if policies.manual_actions == "allow-visible" {
         PolicyDecision::Manual {
@@ -437,12 +487,13 @@ fn manual(
         }
     };
     PlannedChange {
-        resource: manual_resource_id(&desired.name, user_id, package_name),
+        resource,
         kind: ChangeKind::Manual,
         summary: instruction.clone(),
         operation: Operation::Manual { instruction },
         risk: Risk::Low,
         policy,
+        depends_on,
     }
 }
 
@@ -461,30 +512,8 @@ fn blocked(
         policy: PolicyDecision::Deny {
             reason: "blocked".into(),
         },
+        depends_on: Vec::new(),
     }
-}
-
-fn delegated_instruction(package_name: &str, app: &DesiredApp) -> String {
-    match app.source.as_ref() {
-        Some(source) if source.kind == "obtainium" => obtainium_instruction(package_name, source),
-        _ => format!("Install {package_name} through its delegated or manual source"),
-    }
-}
-
-fn obtainium_required_user(desired: &DesiredDevice) -> Option<u32> {
-    desired.users.values().find_map(|user| {
-        user.apps
-            .values()
-            .any(|app| {
-                app.state == AppState::Present
-                    && app.management == ManagementMode::Delegated
-                    && app
-                        .source
-                        .as_ref()
-                        .is_some_and(|source| source.kind == "obtainium")
-            })
-            .then_some(user.android_user_id)
-    })
 }
 
 fn declared_packages(desired: &DesiredDevice) -> BTreeSet<String> {

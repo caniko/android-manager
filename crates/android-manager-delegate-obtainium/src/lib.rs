@@ -1,55 +1,105 @@
-use android_manager_model::SourceIntent;
-use anyhow::{bail, Result};
-use serde::Serialize;
+use android_manager_adapter::{
+    AdapterError, AdapterErrorCode, AdapterResult, DelegateProvider, DelegateRequest,
+};
+use android_manager_model::{
+    manual_resource_id, package_resource_id, AdapterCapability, AdapterDescriptor, AdapterKind,
+    DelegatePlan, DelegatedAction, PrerequisiteResource, SourceIntent,
+};
+use std::collections::BTreeSet;
 
 pub const OBTAINIUM_PACKAGE: &str = "dev.imranr.obtainium";
 
-pub fn kind() -> &'static str {
-    "obtainium"
-}
+pub struct ObtainiumProvider;
 
 pub fn source_url(source: &SourceIntent) -> Option<&str> {
     source.url.as_deref().or(source.repository.as_deref())
 }
 
-pub fn instruction(package_name: &str, source: &SourceIntent) -> String {
+fn instruction(package_name: &str, source: &SourceIntent) -> String {
     match source_url(source) {
         Some(url) => format!("Add {package_name} to Obtainium from {url}"),
         None => format!("Add {package_name} to Obtainium"),
     }
 }
 
-pub fn obtainium_install_instruction() -> String {
+fn obtainium_install_instruction() -> String {
     format!("Install Obtainium ({OBTAINIUM_PACKAGE}) to manage delegated apps")
 }
 
-#[derive(Debug, Serialize)]
-pub struct ObtainiumApp {
-    pub id: String,
-    pub url: String,
-}
+impl DelegateProvider for ObtainiumProvider {
+    fn descriptor(&self) -> AdapterDescriptor {
+        AdapterDescriptor {
+            id: "obtainium".into(),
+            kind: AdapterKind::Delegate,
+            capabilities: BTreeSet::from([AdapterCapability::PlanDelegate]),
+        }
+    }
 
-#[derive(Debug, Serialize)]
-pub struct ObtainiumExport {
-    pub apps: Vec<ObtainiumApp>,
-}
+    fn validate_config(&self, source: &SourceIntent) -> AdapterResult<()> {
+        let Some(url) = source_url(source) else {
+            return Err(AdapterError::new(
+                AdapterErrorCode::InvalidConfiguration,
+                "obtainium",
+                "source.url or source.repository is required",
+            ));
+        };
+        if url.split_once("://").is_some_and(|(_, rest)| {
+            rest.split(['/', '?', '#'])
+                .next()
+                .is_some_and(|authority| authority.contains('@'))
+        }) {
+            return Err(AdapterError::new(
+                AdapterErrorCode::InvalidConfiguration,
+                "obtainium",
+                "credential-bearing source URLs are forbidden",
+            ));
+        }
+        Ok(())
+    }
 
-pub fn export_app(package_name: &str, source: &SourceIntent) -> Result<ObtainiumApp> {
-    let Some(url) = source_url(source) else {
-        bail!("obtainium {package_name} needs source.url or source.repository");
-    };
-    Ok(ObtainiumApp {
-        id: package_name.to_string(),
-        url: url.to_string(),
-    })
-}
+    fn supports(&self, source: &SourceIntent) -> bool {
+        source.kind == "obtainium"
+    }
 
-pub fn export_json(apps: &[(String, SourceIntent)]) -> Result<String> {
-    let apps = apps
-        .iter()
-        .map(|(package, source)| export_app(package, source))
-        .collect::<Result<Vec<_>>>()?;
-    Ok(serde_json::to_string_pretty(&ObtainiumExport { apps })?)
+    fn plan(&self, request: DelegateRequest<'_>) -> AdapterResult<DelegatePlan> {
+        let source = request.app.source.as_ref().ok_or_else(|| {
+            AdapterError::new(
+                AdapterErrorCode::InvalidConfiguration,
+                "obtainium",
+                format!("{} has no source", request.package_name),
+            )
+        })?;
+        self.validate_config(source)?;
+        let prerequisite =
+            package_resource_id(request.device_name, request.user_id, OBTAINIUM_PACKAGE);
+        let obtainium_installed =
+            request.snapshot.packages.iter().any(|package| {
+                package.name == OBTAINIUM_PACKAGE && package.user_id == request.user_id
+            });
+        Ok(DelegatePlan {
+            action: DelegatedAction {
+                resource: manual_resource_id(
+                    request.device_name,
+                    request.user_id,
+                    request.package_name,
+                ),
+                instruction: instruction(request.package_name, source),
+                depends_on: if obtainium_installed {
+                    Vec::new()
+                } else {
+                    vec![prerequisite.clone()]
+                },
+            },
+            prerequisites: if obtainium_installed {
+                Vec::new()
+            } else {
+                vec![PrerequisiteResource {
+                    resource: prerequisite,
+                    instruction: obtainium_install_instruction(),
+                }]
+            },
+        })
+    }
 }
 
 #[cfg(test)]
@@ -57,15 +107,10 @@ mod tests {
     use super::*;
 
     fn source(url: Option<&str>, repository: Option<&str>) -> SourceIntent {
-        SourceIntent {
-            kind: kind().into(),
-            path: None,
-            url: url.map(str::to_string),
-            sha256: None,
-            repository: repository.map(str::to_string),
-            identity: None,
-            channel: None,
-        }
+        let mut source = SourceIntent::new("obtainium");
+        source.url = url.map(str::to_string);
+        source.repository = repository.map(str::to_string);
+        source
     }
 
     #[test]
@@ -79,28 +124,44 @@ mod tests {
     }
 
     #[test]
-    fn export_prefers_url_and_requires_one() {
-        let app = export_app(
-            "org.example.app",
-            &source(
-                Some("https://f-droid.org/packages/org.example.app"),
-                Some("ignored"),
-            ),
-        )
-        .unwrap();
-        assert_eq!(app.id, "org.example.app");
-        assert_eq!(app.url, "https://f-droid.org/packages/org.example.app");
-        assert!(export_app("org.example.app", &source(None, None)).is_err());
+    fn provider_plans_user_scoped_prerequisite() {
+        let app = android_manager_model::DesiredApp {
+            state: android_manager_model::AppState::Present,
+            management: android_manager_model::ManagementMode::Delegated,
+            source: Some(source(None, Some("https://github.com/ex/app"))),
+            version_policy: android_manager_model::VersionPolicy::Presence,
+            verification: android_manager_model::Verification::default(),
+        };
+        let snapshot = android_manager_model::DeviceSnapshot {
+            transport_id: "adb:test".into(),
+            serial: "test".into(),
+            manufacturer: None,
+            sdk: 35,
+            abis: Vec::new(),
+            users: vec![10],
+            packages: Vec::new(),
+            capabilities: android_manager_model::DeviceCapabilities::default(),
+        };
+        let plan = ObtainiumProvider
+            .plan(DelegateRequest {
+                device_name: "phone",
+                user_id: 10,
+                package_name: "org.example.app",
+                app: &app,
+                snapshot: &snapshot,
+            })
+            .unwrap();
+        assert_eq!(plan.prerequisites.len(), 1);
+        assert_eq!(
+            plan.action.depends_on,
+            [plan.prerequisites[0].resource.clone()]
+        );
     }
 
     #[test]
-    fn export_json_lists_apps() {
-        let json = export_json(&[(
-            "org.example.app".into(),
-            source(None, Some("https://github.com/ex/app")),
-        )])
-        .unwrap();
-        assert!(json.contains("org.example.app"));
-        assert!(json.contains("https://github.com/ex/app"));
+    fn credential_bearing_url_is_rejected() {
+        assert!(ObtainiumProvider
+            .validate_config(&source(Some("https://user:token@example.test/app"), None))
+            .is_err());
     }
 }

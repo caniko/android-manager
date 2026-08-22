@@ -1,31 +1,136 @@
+use android_manager_adapter::{
+    AdapterError, AdapterErrorCode, AdapterResult, ResolveRequest, SourceProvider,
+};
 use android_manager_artifact::{ArtifactInspector, ArtifactStore, HashingStore};
 use android_manager_model::{
-    lock_key, Constraints, DesiredApp, LockEntry, LockedArtifact, LockedSource,
-    ProviderCapabilities, SourceIntent, SCHEMA_VERSION,
+    lock_key, AdapterCapability, AdapterDescriptor, AdapterKind, Constraints, DesiredApp,
+    LockEntry, LockedArtifact, LockedSource, SourceIntent, SCHEMA_VERSION,
 };
 use anyhow::{anyhow, bail, Result};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 
-pub fn capabilities_for(kind: &str) -> ProviderCapabilities {
-    match kind {
-        "local" | "http" => ProviderCapabilities {
-            immutable_resolution: true,
-            signed_metadata: false,
-            multi_artifact: false,
-            requires_authentication: false,
-            supports_offline_realization: kind == "local",
-        },
-        "github" => ProviderCapabilities {
-            immutable_resolution: false,
-            signed_metadata: false,
-            multi_artifact: false,
-            requires_authentication: false,
-            supports_offline_realization: false,
-        },
-        _ => ProviderCapabilities::default(),
+pub struct LocalProvider {
+    inspector: Arc<dyn ArtifactInspector>,
+}
+
+pub struct HttpProvider {
+    inspector: Arc<dyn ArtifactInspector>,
+}
+
+pub struct GithubProvider {
+    inspector: Arc<dyn ArtifactInspector>,
+    fetcher: Arc<dyn ReleaseFetcher>,
+}
+
+impl LocalProvider {
+    pub fn new(inspector: Arc<dyn ArtifactInspector>) -> Self {
+        Self { inspector }
     }
 }
+
+impl HttpProvider {
+    pub fn new(inspector: Arc<dyn ArtifactInspector>) -> Self {
+        Self { inspector }
+    }
+}
+
+impl GithubProvider {
+    pub fn new(inspector: Arc<dyn ArtifactInspector>, fetcher: Arc<dyn ReleaseFetcher>) -> Self {
+        Self { inspector, fetcher }
+    }
+}
+
+macro_rules! source_provider {
+    ($provider:ty, $id:literal, $capabilities:expr, $resolve:expr, $validate:expr) => {
+        impl SourceProvider for $provider {
+            fn descriptor(&self) -> AdapterDescriptor {
+                AdapterDescriptor {
+                    id: $id.into(),
+                    kind: AdapterKind::Source,
+                    capabilities: $capabilities,
+                }
+            }
+
+            fn validate_config(&self, source: &SourceIntent) -> AdapterResult<()> {
+                ($validate)(source).map_err(|message| {
+                    AdapterError::new(AdapterErrorCode::InvalidConfiguration, $id, message)
+                })
+            }
+
+            fn supports(&self, source: &SourceIntent) -> bool {
+                source.kind == $id
+            }
+
+            fn resolve(&self, request: ResolveRequest<'_>) -> AdapterResult<(String, LockEntry)> {
+                self.validate_config(request.app.source.as_ref().ok_or_else(|| {
+                    AdapterError::new(
+                        AdapterErrorCode::InvalidConfiguration,
+                        $id,
+                        format!("{} has no source", request.package_name),
+                    )
+                })?)?;
+                ($resolve)(self, request).map_err(|error: anyhow::Error| {
+                    AdapterError::new(AdapterErrorCode::ResolutionFailed, $id, error.to_string())
+                })
+            }
+        }
+    };
+}
+
+source_provider!(
+    LocalProvider,
+    "local",
+    BTreeSet::from([AdapterCapability::Resolve]),
+    |provider: &LocalProvider, request: ResolveRequest<'_>| resolve_local(
+        request.package_name,
+        request.app,
+        request.app.source.as_ref().unwrap(),
+        provider.inspector.as_ref(),
+    ),
+    |source: &SourceIntent| source
+        .path
+        .as_ref()
+        .map(|_| ())
+        .ok_or_else(|| "local source requires path".to_string())
+);
+
+source_provider!(
+    HttpProvider,
+    "http",
+    BTreeSet::from([AdapterCapability::Resolve]),
+    |provider: &HttpProvider, request: ResolveRequest<'_>| resolve_http(
+        request.package_name,
+        request.app,
+        request.app.source.as_ref().unwrap(),
+        provider.inspector.as_ref(),
+    ),
+    |source: &SourceIntent| if source.url.is_some() && source.sha256.is_some() {
+        Ok(())
+    } else {
+        Err("http source requires url and sha256".to_string())
+    }
+);
+
+source_provider!(
+    GithubProvider,
+    "github",
+    BTreeSet::from([AdapterCapability::Resolve]),
+    |provider: &GithubProvider, request: ResolveRequest<'_>| resolve_github(
+        request.package_name,
+        request.app,
+        request.app.source.as_ref().unwrap(),
+        provider.inspector.as_ref(),
+        provider.fetcher.as_ref(),
+    ),
+    |source: &SourceIntent| source
+        .repository
+        .as_ref()
+        .map(|_| ())
+        .ok_or_else(|| "github source requires repository".to_string())
+);
 
 pub fn resolve_host_app(
     package_name: &str,
@@ -84,6 +189,7 @@ fn resolve_local(
                 url: None,
                 repository: None,
                 repository_identity: None,
+                adapter: None,
             },
             package_name,
             &inspected,
@@ -113,7 +219,7 @@ fn resolve_http(
         .sha256
         .clone()
         .ok_or_else(|| anyhow!("http source for {package_name} requires sha256"))?;
-    let dest = std::env::temp_dir().join(format!("android-manager-{sha256}.apk"));
+    let cache = tempfile::tempdir()?;
     let artifact = LockedArtifact {
         kind: "apk".into(),
         url: Some(url),
@@ -122,7 +228,7 @@ fn resolve_http(
         size: None,
         abis: Vec::new(),
     };
-    let path = HashingStore::new(dest.parent().unwrap().to_path_buf()).materialize(&artifact)?;
+    let path = HashingStore::new(cache.path().to_path_buf()).materialize(&artifact)?;
     let inspected = inspector.inspect(std::slice::from_ref(&path))?;
     if app.verification.require_package_name_match && inspected.package_name != package_name {
         bail!(
@@ -139,13 +245,14 @@ fn resolve_http(
                 url: artifact.url.clone(),
                 repository: None,
                 repository_identity: None,
+                adapter: None,
             },
             package_name,
             &inspected,
             LockedArtifact {
                 kind: "apk".into(),
                 url: artifact.url,
-                path: Some(path),
+                path: None,
                 sha256,
                 size: None,
                 abis: inspected.abis.clone(),
@@ -187,6 +294,14 @@ pub struct LiveGithubFetcher;
 impl ReleaseFetcher for LiveGithubFetcher {
     fn load(&self, repository: &str, channel: &str) -> Result<GithubRelease> {
         let repo = normalize_repo(repository)?;
+        if channel != "latest"
+            && (channel.is_empty()
+                || !channel
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte)))
+        {
+            bail!("github channel contains unsupported characters");
+        }
         let url = if channel == "latest" {
             format!("https://api.github.com/repos/{repo}/releases/latest")
         } else {
@@ -199,6 +314,10 @@ impl ReleaseFetcher for LiveGithubFetcher {
             .ok_or_else(|| anyhow!("release path is not utf-8"))?;
         let mut args = vec![
             "-fsSL".into(),
+            "--proto".into(),
+            "=https".into(),
+            "--proto-redir".into(),
+            "=https".into(),
             "-A".into(),
             "android-manager".into(),
             "-H".into(),
@@ -209,16 +328,42 @@ impl ReleaseFetcher for LiveGithubFetcher {
         ];
         if let Ok(token) = std::env::var("GITHUB_TOKEN") {
             if !token.is_empty() {
+                if !token
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+                {
+                    bail!("GITHUB_TOKEN contains unsupported characters");
+                }
+                let header = dir.path().join("github-token-header");
+                write_secret_header(&header, &token)?;
                 args.insert(args.len() - 1, "-H".into());
-                args.insert(args.len() - 1, format!("Authorization: Bearer {token}"));
+                args.insert(args.len() - 1, format!("@{}", header.display()));
             }
         }
-        let captured = nix_manager_core::exec::cap("curl", args);
-        if !captured.ok() {
-            bail!("curl failed for {url}: {}", captured.stderr);
+        let status = std::process::Command::new("curl")
+            .args(args)
+            .env_remove("GITHUB_TOKEN")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if !status.is_ok_and(|status| status.success()) {
+            bail!("github release request failed");
         }
         Ok(serde_json::from_str(&fs::read_to_string(dest)?)?)
     }
+}
+
+fn write_secret_header(path: &std::path::Path, token: &str) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    writeln!(file, "Authorization: Bearer {token}")?;
+    Ok(())
 }
 
 pub struct StaticGithubFetcher {
@@ -272,7 +417,7 @@ fn resolve_github(
 ) -> Result<(String, LockEntry)> {
     let asset = github_artifact(package_name, source, fetcher)?;
     let sha256 = asset_sha256(package_name, source, &asset)?;
-    let dest = std::env::temp_dir().join(format!("android-manager-{sha256}.apk"));
+    let cache = tempfile::tempdir()?;
     let artifact = LockedArtifact {
         kind: "apk".into(),
         url: Some(asset.browser_download_url.clone()),
@@ -281,7 +426,7 @@ fn resolve_github(
         size: asset.size,
         abis: Vec::new(),
     };
-    let path = HashingStore::new(dest.parent().unwrap().to_path_buf()).materialize(&artifact)?;
+    let path = HashingStore::new(cache.path().to_path_buf()).materialize(&artifact)?;
     let inspected = inspector.inspect(std::slice::from_ref(&path))?;
     if app.verification.require_package_name_match && inspected.package_name != package_name {
         bail!(
@@ -298,13 +443,14 @@ fn resolve_github(
                 url: Some(asset.browser_download_url.clone()),
                 repository: source.repository.clone(),
                 repository_identity: None,
+                adapter: None,
             },
             package_name,
             &inspected,
             LockedArtifact {
                 kind: "apk".into(),
                 url: Some(asset.browser_download_url),
-                path: Some(path),
+                path: None,
                 sha256,
                 size: asset.size,
                 abis: inspected.abis.clone(),
@@ -368,11 +514,18 @@ fn normalize_repo(repository: &str) -> Result<String> {
         .unwrap_or(repository);
     let mut parts = trimmed.split('/');
     match (parts.next(), parts.next(), parts.next()) {
-        (Some(owner), Some(repo), None) if !owner.is_empty() && !repo.is_empty() => {
+        (Some(owner), Some(repo), None) if valid_repo_part(owner) && valid_repo_part(repo) => {
             Ok(format!("{owner}/{repo}"))
         }
         _ => bail!("github repository must be owner/repo, got {repository}"),
     }
+}
+
+fn valid_repo_part(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
 }
 
 #[cfg(test)]
@@ -396,15 +549,11 @@ mod tests {
     }
 
     fn source(url: Option<&str>, sha256: Option<&str>) -> SourceIntent {
-        SourceIntent {
-            kind: "github".into(),
-            path: None,
-            url: url.map(ToOwned::to_owned),
-            sha256: sha256.map(ToOwned::to_owned),
-            repository: Some("owner/app".into()),
-            identity: None,
-            channel: None,
-        }
+        let mut source = SourceIntent::new("github");
+        source.url = url.map(ToOwned::to_owned);
+        source.sha256 = sha256.map(ToOwned::to_owned);
+        source.repository = Some("owner/app".into());
+        source
     }
 
     #[test]

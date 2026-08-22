@@ -1,0 +1,20 @@
+[package]
+name = "android-manager-fixture-adapter"
+description = "Fixture external adapter for protocol tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+android-manager-plugin-protocol.workspace = true
+
+[dev-dependencies]
+android-manager-artifact.workspace = true
+android-manager-model.workspace = true
+android-manager-provider-fdroid.workspace = true
+android-manager-provider-release.workspace = true
+android-manager-runtime.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true

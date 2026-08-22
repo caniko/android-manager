@@ -90,11 +90,13 @@ impl DeviceBackend for MemoryDevice {
             Operation::Install {
                 package_name,
                 version_code,
+                signers,
                 ..
             }
             | Operation::Upgrade {
                 package_name,
                 to: version_code,
+                signers,
                 ..
             } => {
                 snapshot
@@ -105,7 +107,7 @@ impl DeviceBackend for MemoryDevice {
                     user_id,
                     version_code: *version_code,
                     version_name: None,
-                    signers: vec!["sha256:aa".into()],
+                    signers: signers.clone(),
                     enabled: true,
                 });
             }

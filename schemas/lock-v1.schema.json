@@ -5,6 +5,34 @@
   "required": ["schemaVersion", "entries"],
   "properties": {
     "schemaVersion": {"const": 1},
-    "entries": {"type": "object"}
+    "entries": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["source", "packageName", "versionCode", "signers", "artifacts"],
+        "properties": {
+          "source": {
+            "type": "object",
+            "required": ["type"],
+            "properties": {
+              "type": {"type": "string"},
+              "path": {"type": ["string", "null"]},
+              "url": {"type": ["string", "null"]},
+              "repository": {"type": ["string", "null"]},
+              "repositoryIdentity": {"type": ["string", "null"]},
+              "adapter": {"type": ["string", "null"]}
+            }
+          },
+          "packageName": {"type": "string"},
+          "versionName": {"type": ["string", "null"]},
+          "versionCode": {"type": "integer"},
+          "signers": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "artifacts": {"type": "array"}
+        }
+      }
+    }
   }
 }

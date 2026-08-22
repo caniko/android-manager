@@ -1,6 +1,7 @@
-use android_manager_model::{sha256_hex, LockedArtifact};
+use android_manager_model::{is_sha256_hex, sha256_hex, LockedArtifact};
 use anyhow::{anyhow, bail, Context, Result};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +43,12 @@ impl HashingStore {
     }
 
     pub fn verify_file(path: &Path, expected: &str) -> Result<String> {
+        if !is_sha256_hex(expected) {
+            bail!("invalid artifact sha256");
+        }
+        if !path.is_file() {
+            bail!("artifact path is not a regular file: {}", path.display());
+        }
         let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
         let actual = sha256_hex(&bytes);
         if actual != expected {
@@ -52,31 +59,88 @@ impl HashingStore {
         }
         Ok(actual)
     }
+
+    fn ensure_cache(&self) -> Result<()> {
+        fs::create_dir_all(&self.cache_dir)?;
+        let metadata = fs::symlink_metadata(&self.cache_dir)?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            bail!("artifact cache is not a directory");
+        }
+        fs::set_permissions(&self.cache_dir, fs::Permissions::from_mode(0o700))?;
+        Ok(())
+    }
+
+    fn cached(&self, expected: &str) -> Result<Option<PathBuf>> {
+        let dest = self.cache_dir.join(expected);
+        if let Ok(metadata) = fs::symlink_metadata(&dest) {
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                bail!("artifact cache entry is not a regular file");
+            }
+            Self::verify_file(&dest, expected)?;
+            return Ok(Some(dest));
+        }
+        Ok(None)
+    }
+
+    fn cache_bytes(&self, bytes: &[u8], expected: &str) -> Result<PathBuf> {
+        let actual = sha256_hex(bytes);
+        if actual != expected {
+            bail!("artifact hash mismatch");
+        }
+        self.ensure_cache()?;
+        if let Some(dest) = self.cached(expected)? {
+            return Ok(dest);
+        }
+        let dest = self.cache_dir.join(expected);
+        nix_manager_core::fs::atomic_write_0600(&dest, bytes)?;
+        Self::verify_file(&dest, expected)?;
+        Ok(dest)
+    }
 }
 
 impl ArtifactStore for HashingStore {
     fn materialize(&self, artifact: &LockedArtifact) -> Result<PathBuf> {
+        if !is_sha256_hex(&artifact.sha256) {
+            bail!("invalid artifact sha256");
+        }
         if let Some(path) = &artifact.path {
-            Self::verify_file(path, &artifact.sha256)?;
-            return Ok(path.clone());
+            let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+            return self.cache_bytes(&bytes, &artifact.sha256);
         }
         let url = artifact
             .url
             .as_ref()
             .ok_or_else(|| anyhow!("artifact has neither path nor url"))?;
-        fs::create_dir_all(&self.cache_dir)?;
-        let dest = self.cache_dir.join(&artifact.sha256);
-        if dest.exists() {
-            Self::verify_file(&dest, &artifact.sha256)?;
+        if !url.starts_with("https://") || url[8..].contains('@') {
+            bail!("artifact URL must be credential-free HTTPS");
+        }
+        self.ensure_cache()?;
+        if let Some(dest) = self.cached(&artifact.sha256)? {
             return Ok(dest);
         }
-        let captured =
-            nix_manager_core::exec::cap("curl", ["-fsSL", "-o", dest.to_str().unwrap(), url]);
+        let temp = tempfile::NamedTempFile::new_in(&self.cache_dir)?;
+        let temp_path = temp
+            .path()
+            .to_str()
+            .ok_or_else(|| anyhow!("artifact cache path is not utf-8"))?;
+        let captured = nix_manager_core::exec::cap(
+            "curl",
+            [
+                "-fsSL",
+                "--proto",
+                "=https",
+                "--proto-redir",
+                "=https",
+                "-o",
+                temp_path,
+                url,
+            ],
+        );
         if !captured.ok() {
-            bail!("curl failed for {url}: {}", captured.stderr);
+            bail!("artifact download failed");
         }
-        Self::verify_file(&dest, &artifact.sha256)?;
-        Ok(dest)
+        let bytes = fs::read(temp.path())?;
+        self.cache_bytes(&bytes, &artifact.sha256)
     }
 }
 
@@ -181,5 +245,28 @@ mod tests {
             parse_signer_line("Signer #1 certificate SHA-256 digest: ab:cd"),
             Some("sha256:abcd".into())
         );
+    }
+
+    #[test]
+    fn path_artifact_is_copied_into_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.apk");
+        let bytes = b"apk";
+        fs::write(&source, bytes).unwrap();
+        let expected = sha256_hex(bytes);
+        let cached = HashingStore::new(dir.path().join("cache"))
+            .materialize(&LockedArtifact {
+                kind: "apk".into(),
+                url: None,
+                path: Some(source.clone()),
+                sha256: expected,
+                size: None,
+                abis: Vec::new(),
+            })
+            .unwrap();
+
+        assert_ne!(cached, source);
+        fs::write(source, b"changed").unwrap();
+        assert_eq!(fs::read(cached).unwrap(), bytes);
     }
 }

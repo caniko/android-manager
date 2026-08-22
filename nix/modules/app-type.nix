@@ -12,7 +12,7 @@
       type = lib.types.nullOr (lib.types.submodule {
         options = {
           type = lib.mkOption {
-            type = lib.types.str;
+            type = lib.types.enum ["local" "http" "fdroid" "github" "obtainium" "external"];
           };
           path = lib.mkOption {
             type = lib.types.nullOr lib.types.path;
@@ -37,6 +37,14 @@
           channel = lib.mkOption {
             type = lib.types.nullOr lib.types.str;
             default = null;
+          };
+          adapter = lib.mkOption {
+            type = lib.types.nullOr lib.types.str;
+            default = null;
+          };
+          config = lib.mkOption {
+            type = lib.types.attrs;
+            default = {};
           };
         };
       });
@@ -78,7 +86,7 @@
           if config.source.path == null
           then null
           else "${config.source.path}";
-        inherit (config.source) url sha256 repository identity channel;
+        inherit (config.source) url sha256 repository identity channel adapter config;
       };
     verification = {
       inherit (config.verification) requireSignerPin requirePackageNameMatch;

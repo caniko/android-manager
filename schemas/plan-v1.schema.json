@@ -5,6 +5,21 @@
   "required": ["schemaVersion", "configDigest", "lockDigest", "deviceBinding", "snapshotDigest", "changes"],
   "properties": {
     "schemaVersion": {"const": 1},
-    "changes": {"type": "array"}
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["resource", "kind", "summary", "operation", "risk", "policy"],
+        "properties": {
+          "resource": {"type": "string"},
+          "kind": {"type": "string"},
+          "summary": {"type": "string"},
+          "dependsOn": {
+            "type": "array",
+            "items": {"type": "string"}
+          }
+        }
+      }
+    }
   }
 }

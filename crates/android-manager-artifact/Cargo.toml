@@ -12,3 +12,4 @@ android-manager-model.workspace = true
 anyhow.workspace = true
 nix-manager-core.workspace = true
 sha2.workspace = true
+tempfile.workspace = true
