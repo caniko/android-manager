@@ -86,6 +86,9 @@ dependencies = [
  "android-manager-model",
  "anyhow",
  "nix-manager-core",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

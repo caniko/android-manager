@@ -8,6 +8,7 @@
     ./providers/local.nix
     ./providers/http.nix
     ./providers/fdroid.nix
+    ./providers/github.nix
     ./resources/packages.nix
   ];
 }

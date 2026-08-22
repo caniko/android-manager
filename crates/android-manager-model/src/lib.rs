@@ -433,6 +433,10 @@ pub fn lock_key(source: &SourceIntent, package: &str) -> String {
                 .as_deref()
                 .unwrap_or("https://f-droid.org/repo")
         ),
+        "github" => format!(
+            "github:{}:{package}",
+            source.repository.as_deref().unwrap_or("unknown")
+        ),
         other => format!("{other}:{package}"),
     }
 }

@@ -4,6 +4,9 @@ pub use android_manager_artifact::{
 pub use android_manager_device_adb::{AdbBackend, DeviceBackend, MemoryDevice, SystemRunner};
 pub use android_manager_model::{ExecutionPlan, Manifest};
 pub use android_manager_provider_fdroid::{IndexFetcher, LiveJarFetcher, StaticFetcher};
+pub use android_manager_provider_release::{
+    LiveGithubFetcher, ReleaseFetcher, StaticGithubFetcher,
+};
 
 use android_manager_engine::plan_device;
 use android_manager_model::{
@@ -75,6 +78,7 @@ pub struct Runtime<B> {
     pub state_dir: PathBuf,
     pub confirmer: Box<dyn Confirmer>,
     pub fetcher: Box<dyn IndexFetcher>,
+    pub releases: Box<dyn ReleaseFetcher>,
 }
 
 impl<B: DeviceBackend> Runtime<B> {
@@ -110,6 +114,7 @@ impl<B: DeviceBackend> Runtime<B> {
             state_dir,
             confirmer: Box::new(TypedConfirmer),
             fetcher: Box::new(LiveJarFetcher),
+            releases: Box::new(LiveGithubFetcher),
         })
     }
 
@@ -124,6 +129,7 @@ impl<B: DeviceBackend> Runtime<B> {
                     app,
                     self.inspector.as_ref(),
                     self.fetcher.as_ref(),
+                    self.releases.as_ref(),
                 )?;
                 self.lock.entries.insert(key, entry);
             }
@@ -325,6 +331,7 @@ fn resolve_app(
     app: &android_manager_model::DesiredApp,
     inspector: &dyn ArtifactInspector,
     fetcher: &dyn IndexFetcher,
+    releases: &dyn ReleaseFetcher,
 ) -> Result<(String, android_manager_model::LockEntry)> {
     let kind = app
         .source
@@ -332,7 +339,9 @@ fn resolve_app(
         .map(|source| source.kind.as_str())
         .unwrap_or_default();
     match kind {
-        "local" | "http" => resolve_host_app(package_name, app, inspector),
+        "local" | "http" | "github" => {
+            resolve_host_app(package_name, app, inspector, Some(releases))
+        }
         "fdroid" => resolve_fdroid(package_name, app, fetcher),
         other => bail!("provider {other} is not implemented"),
     }

@@ -103,6 +103,9 @@ fn lock_plan_apply_verify_is_idempotent() {
         fetcher: Box::new(StaticFetcher {
             index: android_manager_provider_fdroid::IndexV1::default(),
         }),
+        releases: Box::new(StaticGithubFetcher {
+            release: Default::default(),
+        }),
     };
     runtime.lock().unwrap();
     runtime.realize().unwrap();
@@ -133,6 +136,9 @@ fn apply_rejects_stale_plan_bindings() {
         confirmer: Box::new(AutoConfirmer),
         fetcher: Box::new(StaticFetcher {
             index: android_manager_provider_fdroid::IndexV1::default(),
+        }),
+        releases: Box::new(StaticGithubFetcher {
+            release: Default::default(),
         }),
     };
     runtime.lock().unwrap();
@@ -208,6 +214,9 @@ fn lock_resolves_fdroid_from_signed_index_metadata() {
                 ..Default::default()
             },
         }),
+        releases: Box::new(StaticGithubFetcher {
+            release: Default::default(),
+        }),
     };
     let lock = runtime.lock().unwrap();
     let entry = lock
@@ -218,5 +227,78 @@ fn lock_resolves_fdroid_from_signed_index_metadata() {
     assert_eq!(
         entry.artifacts[0].url.as_deref(),
         Some("https://f-droid.org/repo/org.example.app_10.apk")
+    );
+}
+
+#[test]
+fn lock_resolves_github_release_apk() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = apk_bytes();
+    let sha = android_manager_model::sha256_hex(&bytes);
+    fs::write(std::env::temp_dir().join(&sha), &bytes).unwrap();
+    let mut manifest = fixture(dir.path()).1;
+    let app = manifest
+        .device
+        .users
+        .get_mut("owner")
+        .unwrap()
+        .apps
+        .get_mut("org.example.app")
+        .unwrap();
+    app.source = Some(SourceIntent {
+        kind: "github".into(),
+        path: None,
+        url: None,
+        sha256: None,
+        repository: Some("owner/app".into()),
+        identity: None,
+        channel: Some("latest".into()),
+    });
+    let inspector = StaticInspector {
+        package: InspectedPackage {
+            package_name: "org.example.app".into(),
+            version_code: 10,
+            version_name: Some("1.0".into()),
+            signers: vec!["sha256:aa".into()],
+            min_sdk: Some(28),
+            abis: vec!["arm64-v8a".into()],
+        },
+    };
+    let mut runtime = Runtime {
+        manifest,
+        lock: LockFile {
+            schema_version: 1,
+            entries: BTreeMap::new(),
+        },
+        lock_path: dir.path().join("android-manager.lock.json"),
+        backend: MemoryDevice::new(empty_snapshot()),
+        inspector: Box::new(inspector),
+        store: HashingStore::new(dir.path().join("cache")),
+        state_dir: dir.path().join("state"),
+        confirmer: Box::new(AutoConfirmer),
+        fetcher: Box::new(StaticFetcher {
+            index: android_manager_provider_fdroid::IndexV1::default(),
+        }),
+        releases: Box::new(StaticGithubFetcher {
+            release: android_manager_provider_release::GithubRelease {
+                tag_name: Some("v1.0.0".into()),
+                assets: vec![android_manager_provider_release::GithubAsset {
+                    name: "app.apk".into(),
+                    browser_download_url: "https://example.test/app.apk".into(),
+                    digest: Some(format!("sha256:{sha}")),
+                    size: Some(bytes.len() as u64),
+                }],
+            },
+        }),
+    };
+    let lock = runtime.lock().unwrap();
+    let entry = lock
+        .entries
+        .get("github:owner/app:org.example.app")
+        .unwrap();
+    assert_eq!(entry.version_code, 10);
+    assert_eq!(
+        entry.artifacts[0].url.as_deref(),
+        Some("https://example.test/app.apk")
     );
 }

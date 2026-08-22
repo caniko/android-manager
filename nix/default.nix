@@ -87,6 +87,13 @@ nix-manager-core.lib.mkManagerOutputs {
                     identity = "sha256:deadbeef";
                   };
                 };
+                apps."org.example.github" = {
+                  source = {
+                    type = "github";
+                    repository = "owner/app";
+                    channel = "latest";
+                  };
+                };
               };
             };
           })
