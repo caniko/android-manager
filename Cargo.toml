@@ -1,0 +1,46 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/android-manager-model",
+  "crates/android-manager-engine",
+  "crates/android-manager-artifact",
+  "crates/android-manager-provider-release",
+  "crates/android-manager-provider-fdroid",
+  "crates/android-manager-device-adb",
+  "crates/android-manager-delegate-obtainium",
+  "crates/android-manager-plugin-protocol",
+  "crates/android-manager-runtime",
+  "crates/android-manager-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/caniko/android-manager"
+authors = ["caniko"]
+
+[workspace.dependencies]
+android-manager-model = { path = "crates/android-manager-model" }
+android-manager-engine = { path = "crates/android-manager-engine" }
+android-manager-artifact = { path = "crates/android-manager-artifact" }
+android-manager-provider-release = { path = "crates/android-manager-provider-release" }
+android-manager-provider-fdroid = { path = "crates/android-manager-provider-fdroid" }
+android-manager-device-adb = { path = "crates/android-manager-device-adb" }
+android-manager-delegate-obtainium = { path = "crates/android-manager-delegate-obtainium" }
+android-manager-plugin-protocol = { path = "crates/android-manager-plugin-protocol" }
+android-manager-runtime = { path = "crates/android-manager-runtime" }
+nix-manager-core = { git = "https://github.com/caniko/nix-manager-core.git", rev = "06eef7cdcbaf81a9a233aedb15063c62d040ec83" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+tempfile = "3"
+
+[workspace.metadata.crane]
+name = "android-manager"
+
+[profile.release]
+lto = true
+strip = true

@@ -1,0 +1,13 @@
+[package]
+name = "android-manager-plugin-protocol"
+description = "Versioned external adapter protocol (stub until Phase 5)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+android-manager-model.workspace = true
+serde.workspace = true
+serde_json.workspace = true

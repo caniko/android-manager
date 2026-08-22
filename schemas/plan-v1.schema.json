@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/caniko/android-manager/schemas/plan-v1.schema.json",
+  "type": "object",
+  "required": ["schemaVersion", "configDigest", "lockDigest", "deviceBinding", "snapshotDigest", "changes"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "changes": {"type": "array"}
+  }
+}

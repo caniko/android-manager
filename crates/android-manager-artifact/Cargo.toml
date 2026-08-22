@@ -1,0 +1,14 @@
+[package]
+name = "android-manager-artifact"
+description = "Artifact store and inspector interfaces for android-manager"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+android-manager-model.workspace = true
+anyhow.workspace = true
+nix-manager-core.workspace = true
+sha2.workspace = true

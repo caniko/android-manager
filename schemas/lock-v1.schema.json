@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/caniko/android-manager/schemas/lock-v1.schema.json",
+  "type": "object",
+  "required": ["schemaVersion", "entries"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "entries": {"type": "object"}
+  }
+}
