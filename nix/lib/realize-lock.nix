@@ -7,12 +7,7 @@
     builtins.isString value && builtins.match "[0-9a-f]{64}" value != null;
   hasUrlCredentials = value:
     builtins.match ".*://[^/]*@.*" value != null;
-  realize = _: entry: let
-    artifacts = entry.artifacts or [];
-    artifact =
-      if artifacts == []
-      then throw "android-manager lock entry has no artifacts"
-      else builtins.head artifacts;
+  realizeOne = artifact: let
     sha256 = artifact.sha256 or "";
     path = artifact.path or null;
     url = artifact.url or null;
@@ -48,6 +43,12 @@
           hash = "sha256:${sha256}";
         }
     );
+  realize = _: entry: let
+    artifacts = entry.artifacts or [];
+  in
+    if artifacts == []
+    then throw "android-manager lock entry has no artifacts"
+    else map realizeOne artifacts;
 in
   if lock.schemaVersion or null != 1 || !(builtins.isAttrs (lock.entries or null))
   then throw "unsupported android-manager lock schema"

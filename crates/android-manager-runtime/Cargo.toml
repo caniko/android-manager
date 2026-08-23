@@ -18,6 +18,7 @@ android-manager-plugin-protocol.workspace = true
 android-manager-provider-fdroid.workspace = true
 android-manager-provider-release.workspace = true
 anyhow.workspace = true
+libc.workspace = true
 nix-manager-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true

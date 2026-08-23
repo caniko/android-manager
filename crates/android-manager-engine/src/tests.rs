@@ -1,8 +1,8 @@
 use super::*;
 use android_manager_model::{
     Constraints, DelegateOutcome, DelegatePlan, DelegatedAction, DesiredUser, DeviceCapabilities,
-    DeviceSelector, DeviceSnapshot, ExpectedDevice, LockedArtifact, LockedSource,
-    PrerequisiteResource, SourceIntent, Transport, Verification,
+    DeviceSelector, DeviceSnapshot, ExpectedDevice, LockedArtifact, LockedSource, Operation,
+    PrerequisiteResource, SourceIntent, Transport, Verification, VersionPolicy,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -95,6 +95,7 @@ fn installed(name: &str, version_code: i64, signer: &str, user_id: u32) -> Insta
         version_name: None,
         signers: vec![signer.into()],
         enabled: true,
+        inspected: true,
     }
 }
 
@@ -234,7 +235,7 @@ fn incompatible_abi_is_blocked() {
 }
 
 #[test]
-fn package_on_other_user_is_treated_as_missing() {
+fn package_on_other_user_is_enabled() {
     let pkg = "org.example.app";
     let result = plan(
         BTreeMap::from([(pkg.into(), host_app("local"))]),
@@ -242,6 +243,10 @@ fn package_on_other_user_is_treated_as_missing() {
         vec![installed(pkg, 10, "sha256:aa", 10)],
     );
     assert_eq!(result.changes[0].kind, ChangeKind::Create);
+    assert!(matches!(
+        result.changes[0].operation,
+        Operation::EnableExisting { .. }
+    ));
 }
 
 #[test]
@@ -362,6 +367,75 @@ fn applying_install_to_model_yields_empty_second_plan() {
     snap.packages.push(installed(pkg, 10, "sha256:aa", 0));
     let second = plan_device(&desired, &locks, &snap, &BTreeMap::new()).unwrap();
     assert!(second.automatic_is_empty());
+}
+
+#[test]
+fn presence_wrong_signer_is_blocked() {
+    let pkg = "org.example.app";
+    let mut app = host_app("local");
+    app.version_policy = VersionPolicy::Presence;
+    let result = plan(
+        BTreeMap::from([(pkg.into(), app)]),
+        lock_file(pkg, 10, &["sha256:aa"], &["arm64-v8a"]),
+        vec![installed(pkg, 99, "sha256:bb", 0)],
+    );
+    assert_eq!(result.changes[0].kind, ChangeKind::Blocked);
+    assert!(result.changes[0].summary.contains("signer mismatch"));
+}
+
+#[test]
+fn uninspected_inventory_is_blocked() {
+    let pkg = "org.example.app";
+    let mut current = installed(pkg, 10, "sha256:aa", 0);
+    current.inspected = false;
+    let result = plan(
+        BTreeMap::from([(pkg.into(), host_app("local"))]),
+        lock_file(pkg, 10, &["sha256:aa"], &["arm64-v8a"]),
+        vec![current],
+    );
+    assert_eq!(result.changes[0].kind, ChangeKind::Blocked);
+    assert!(result.changes[0].summary.contains("not inspected"));
+}
+
+#[test]
+fn newer_than_lock_can_be_denied() {
+    let pkg = "org.example.app";
+    let mut desired = device(BTreeMap::from([(pkg.into(), host_app("local"))]));
+    desired.policies.newer_than_lock = "deny".into();
+    let result = plan_device(
+        &desired,
+        &lock_file(pkg, 10, &["sha256:aa"], &["arm64-v8a"]),
+        &snapshot(vec![installed(pkg, 12, "sha256:aa", 0)]),
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(result.changes[0].kind, ChangeKind::Blocked);
+}
+
+#[test]
+fn realized_split_artifacts_are_kept() {
+    let pkg = "org.example.app";
+    let key = "local:org.example.app";
+    let realized = BTreeMap::from([(
+        key.into(),
+        vec![
+            PathBuf::from("/tmp/base.apk"),
+            PathBuf::from("/tmp/split.apk"),
+        ],
+    )]);
+    let result = plan_device(
+        &device(BTreeMap::from([(pkg.into(), host_app("local"))])),
+        &lock_file(pkg, 10, &["sha256:aa"], &["arm64-v8a"]),
+        &snapshot(vec![]),
+        &realized,
+    )
+    .unwrap();
+    match &result.changes[0].operation {
+        Operation::Install { artifact_paths, .. } => {
+            assert_eq!(artifact_paths.len(), 2);
+        }
+        other => panic!("expected install, got {other:?}"),
+    }
 }
 
 #[test]

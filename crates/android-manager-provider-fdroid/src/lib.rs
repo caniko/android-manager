@@ -75,12 +75,16 @@ pub struct LiveJarFetcher;
 impl IndexFetcher for LiveJarFetcher {
     fn load(&self, repository: &str, identity: &str) -> Result<IndexV1> {
         let repo = repository.trim_end_matches('/');
+        require_https(repo)?;
         let url = format!("{repo}/index-v1.jar");
         let dir = tempfile::tempdir().context("fdroid jar tempdir")?;
         let jar = dir.path().join("index-v1.jar");
         let captured = nix_manager_core::exec::cap(
             "curl",
             [
+                "--proto",
+                "=https",
+                "--tlsv1.2",
                 "-fsSL",
                 "-o",
                 jar.to_str()
@@ -167,6 +171,7 @@ pub fn resolve(
         .as_deref()
         .unwrap_or("https://f-droid.org/repo")
         .trim_end_matches('/');
+    require_https(repository)?;
     let identity = source
         .identity
         .as_deref()
@@ -262,6 +267,14 @@ fn selected_version(
     }
 }
 
+fn require_https(url: &str) -> Result<()> {
+    if url.starts_with("https://") {
+        Ok(())
+    } else {
+        bail!("fdroid repository must be https")
+    }
+}
+
 fn normalize_signer(signer: &str) -> String {
     let digest = signer
         .strip_prefix("sha256:")
@@ -280,14 +293,27 @@ pub fn load_signed_index(jar: &Path, identity: &str) -> Result<IndexV1> {
     let jar_str = jar
         .to_str()
         .ok_or_else(|| anyhow!("jar path is not utf-8"))?;
-    let unzip = nix_manager_core::exec::cap("unzip", ["-o", "-qq", jar_str, "-d", dest_str]);
+    let members = jar_members(jar)?;
+    for member in &members {
+        reject_unsafe_jar_entry(member)?;
+    }
+    let extract: Vec<&str> = members
+        .iter()
+        .filter(|member| allowed_jar_entry(member))
+        .map(String::as_str)
+        .collect();
+    if !extract.contains(&"index-v1.json") {
+        bail!("jar missing index-v1.json");
+    }
+    let mut args = vec!["-o", "-qq", jar_str, "-d", dest_str];
+    args.extend(extract);
+    let unzip = nix_manager_core::exec::cap("unzip", args);
     if !unzip.ok() {
         bail!("unzip failed for {}: {}", jar.display(), unzip.stderr);
     }
     let meta = dest.join("META-INF");
     let (sf, block) = signature_files(&meta)?;
-    verify_cms(&block, &sf)?;
-    let actual = cert_sha256(&block)?;
+    let actual = signer_identity(&block, &sf)?;
     if actual != normalize_signer(identity) {
         bail!("fdroid repository identity {actual} does not match {identity}");
     }
@@ -327,30 +353,56 @@ fn signature_files(meta: &Path) -> Result<(PathBuf, PathBuf)> {
     bail!("no JAR signature block in {}", meta.display())
 }
 
-fn verify_cms(block: &Path, sf: &Path) -> Result<()> {
-    let captured = nix_manager_core::exec::cap(
-        "openssl",
-        [
-            "cms",
-            "-verify",
-            "-inform",
-            "DER",
-            "-in",
-            block.to_str().unwrap(),
-            "-content",
-            sf.to_str().unwrap(),
-            "-noverify",
-            "-out",
-            "/dev/null",
-        ],
-    );
-    if !captured.ok() {
-        bail!("openssl cms verify failed: {}", captured.stderr);
+fn jar_members(jar: &Path) -> Result<Vec<String>> {
+    let jar_str = jar
+        .to_str()
+        .ok_or_else(|| anyhow!("jar path is not utf-8"))?;
+    let listed = nix_manager_core::exec::cap("unzip", ["-Z1", jar_str]);
+    if !listed.ok() {
+        bail!("unzip list failed for {}: {}", jar.display(), listed.stderr);
+    }
+    Ok(listed
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+fn reject_unsafe_jar_entry(name: &str) -> Result<()> {
+    if name.starts_with('/')
+        || name.starts_with('\\')
+        || name.contains('\\')
+        || name.split('/').any(|part| part == "..")
+    {
+        bail!("unsafe jar entry {name}");
     }
     Ok(())
 }
 
-fn cert_sha256(block: &Path) -> Result<String> {
+fn allowed_jar_entry(name: &str) -> bool {
+    if name == "index-v1.json" || name == "META-INF/MANIFEST.MF" {
+        return true;
+    }
+    let Some(file) = name.strip_prefix("META-INF/") else {
+        return false;
+    };
+    if file.contains('/') {
+        return false;
+    }
+    matches!(
+        Path::new(file)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "sf" | "rsa" | "dsa" | "ec"
+    )
+}
+
+fn signer_identity(block: &Path, sf: &Path) -> Result<String> {
     let pem = nix_manager_core::exec::cap(
         "openssl",
         [
@@ -358,42 +410,100 @@ fn cert_sha256(block: &Path) -> Result<String> {
             "-inform",
             "DER",
             "-in",
-            block.to_str().unwrap(),
+            block
+                .to_str()
+                .ok_or_else(|| anyhow!("signature block path is not utf-8"))?,
             "-print_certs",
         ],
     );
     if !pem.ok() {
         bail!("openssl pkcs7 failed: {}", pem.stderr);
     }
-    let begin = pem
-        .stdout
-        .find("-----BEGIN CERTIFICATE-----")
-        .ok_or_else(|| anyhow!("pkcs7 output has no certificate"))?;
-    let rest = &pem.stdout[begin..];
-    let end = rest
-        .find("-----END CERTIFICATE-----")
-        .ok_or_else(|| anyhow!("pkcs7 output has a truncated certificate"))?;
-    let cert_pem = &rest[..end + "-----END CERTIFICATE-----".len()];
+    let certs = pem_certificates(&pem.stdout);
+    if certs.is_empty() {
+        bail!("pkcs7 output has no certificate");
+    }
     let dir = tempfile::tempdir()?;
-    let pem_path = dir.path().join("cert.pem");
+    let mut matched = Vec::new();
+    for (index, cert) in certs.iter().enumerate() {
+        let pem_path = dir.path().join(format!("cert-{index}.pem"));
+        fs::write(&pem_path, cert)?;
+        if cms_verifies(block, sf, &pem_path)? {
+            matched.push(cert_sha256(&pem_path)?);
+        }
+    }
+    match matched.as_slice() {
+        [identity] => Ok(identity.clone()),
+        [] => bail!("openssl cms verify failed: no embedded certificate verified the signature"),
+        _ => bail!("fdroid signature has multiple verifying certificates"),
+    }
+}
+
+fn cms_verifies(block: &Path, sf: &Path, cert: &Path) -> Result<bool> {
+    let captured = nix_manager_core::exec::cap(
+        "openssl",
+        [
+            "cms",
+            "-verify",
+            "-inform",
+            "DER",
+            "-binary",
+            "-in",
+            block
+                .to_str()
+                .ok_or_else(|| anyhow!("signature block path is not utf-8"))?,
+            "-content",
+            sf.to_str()
+                .ok_or_else(|| anyhow!("signature file path is not utf-8"))?,
+            "-nointern",
+            "-certfile",
+            cert.to_str()
+                .ok_or_else(|| anyhow!("certificate path is not utf-8"))?,
+            "-noverify",
+            "-out",
+            "/dev/null",
+        ],
+    );
+    Ok(captured.ok())
+}
+
+fn cert_sha256(pem_path: &Path) -> Result<String> {
+    let dir = tempfile::tempdir()?;
     let der_path = dir.path().join("cert.der");
-    fs::write(&pem_path, cert_pem)?;
     let der = nix_manager_core::exec::cap(
         "openssl",
         [
             "x509",
             "-in",
-            pem_path.to_str().unwrap(),
+            pem_path
+                .to_str()
+                .ok_or_else(|| anyhow!("certificate path is not utf-8"))?,
             "-outform",
             "DER",
             "-out",
-            der_path.to_str().unwrap(),
+            der_path
+                .to_str()
+                .ok_or_else(|| anyhow!("der path is not utf-8"))?,
         ],
     );
     if !der.ok() {
         bail!("openssl x509 failed: {}", der.stderr);
     }
     Ok(normalize_signer(&sha256_hex(&fs::read(der_path)?)))
+}
+
+fn pem_certificates(text: &str) -> Vec<String> {
+    let mut certs = Vec::new();
+    let mut rest = text;
+    while let Some(begin) = rest.find("-----BEGIN CERTIFICATE-----") {
+        let slice = &rest[begin..];
+        let Some(end) = slice.find("-----END CERTIFICATE-----") else {
+            break;
+        };
+        certs.push(slice[..end + "-----END CERTIFICATE-----".len()].to_string());
+        rest = &slice[end + "-----END CERTIFICATE-----".len()..];
+    }
+    certs
 }
 
 fn named_digest(manifest: &str, name: &str) -> Option<String> {
@@ -566,5 +676,38 @@ mod tests {
         let b64 = "aW5kZXgtYnl0ZXM=";
         assert_eq!(decode_b64(b64).unwrap(), bytes);
         assert_eq!(hex.len(), 64);
+    }
+
+    #[test]
+    fn http_repository_is_rejected() {
+        let mut app = app(None);
+        if let Some(source) = app.source.as_mut() {
+            source.repository = Some("http://f-droid.org/repo".into());
+        }
+        let err = resolve("org.example.app", &app, &StaticFetcher { index: index() }).unwrap_err();
+        assert!(err.to_string().contains("https"));
+    }
+
+    #[test]
+    fn rejects_zip_slip_names() {
+        assert!(reject_unsafe_jar_entry("../evil").is_err());
+        assert!(reject_unsafe_jar_entry("/abs").is_err());
+        assert!(reject_unsafe_jar_entry("META-INF\\x").is_err());
+        assert!(reject_unsafe_jar_entry("index-v1.json").is_ok());
+        assert!(allowed_jar_entry("index-v1.json"));
+        assert!(allowed_jar_entry("META-INF/CERT.RSA"));
+        assert!(!allowed_jar_entry("evil.sh"));
+        assert!(!allowed_jar_entry("META-INF/nested/CERT.RSA"));
+    }
+
+    #[test]
+    fn splits_pem_certificates() {
+        let certs = pem_certificates(
+            "ignored\n-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----\n\
+             -----BEGIN CERTIFICATE-----\nBBB\n-----END CERTIFICATE-----\n",
+        );
+        assert_eq!(certs.len(), 2);
+        assert!(certs[0].contains("AAA"));
+        assert!(certs[1].contains("BBB"));
     }
 }

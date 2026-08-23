@@ -12,7 +12,7 @@ pub fn plan_device(
     desired: &DesiredDevice,
     locks: &LockFile,
     snapshot: &android_manager_model::DeviceSnapshot,
-    realized: &BTreeMap<String, PathBuf>,
+    realized: &BTreeMap<String, Vec<PathBuf>>,
 ) -> Result<ExecutionPlan> {
     plan_device_with_delegates(desired, locks, snapshot, realized, &BTreeMap::new())
 }
@@ -21,7 +21,7 @@ pub fn plan_device_with_delegates(
     desired: &DesiredDevice,
     locks: &LockFile,
     snapshot: &android_manager_model::DeviceSnapshot,
-    realized: &BTreeMap<String, PathBuf>,
+    realized: &BTreeMap<String, Vec<PathBuf>>,
     delegates: &BTreeMap<String, DelegateOutcome>,
 ) -> Result<ExecutionPlan> {
     let mut changes = Vec::new();
@@ -135,7 +135,7 @@ fn plan_app(
     desired: &DesiredDevice,
     locks: &LockFile,
     snapshot: &android_manager_model::DeviceSnapshot,
-    realized: &BTreeMap<String, PathBuf>,
+    realized: &BTreeMap<String, Vec<PathBuf>>,
     user_id: u32,
     package_name: &str,
     app: &DesiredApp,
@@ -168,6 +168,11 @@ fn plan_app(
                     "observed package {package_name} is missing"
                 )));
             }
+            if let Some(change) =
+                host_verification(desired, locks, user_id, package_name, app, installed)
+            {
+                return Ok(AppPlan::Change(change));
+            }
             return Ok(AppPlan::None);
         }
         ManagementMode::Host => {}
@@ -177,6 +182,11 @@ fn plan_app(
         app.version_policy,
         VersionPolicy::Observe | VersionPolicy::Presence
     ) {
+        if let Some(change) =
+            host_verification(desired, locks, user_id, package_name, app, installed)
+        {
+            return Ok(AppPlan::Change(change));
+        }
         if installed.is_none() && app.version_policy == VersionPolicy::Presence {
             return host_install(
                 desired,
@@ -227,8 +237,9 @@ fn plan_app(
 
     let paths = artifact_paths(entry, realized, &key);
     match installed {
-        None => Ok(AppPlan::Change(install(
+        None => Ok(AppPlan::Change(install_or_enable(
             desired,
+            snapshot,
             user_id,
             package_name,
             entry,
@@ -240,6 +251,60 @@ fn plan_app(
     }
 }
 
+fn host_verification(
+    desired: &DesiredDevice,
+    locks: &LockFile,
+    user_id: u32,
+    package_name: &str,
+    app: &DesiredApp,
+    installed: Option<&InstalledPackage>,
+) -> Option<PlannedChange> {
+    let Some(source) = &app.source else {
+        return None;
+    };
+    let key = lock_key(source, package_name);
+    let Some(entry) = locks.entries.get(&key) else {
+        if app.verification.require_signer_pin && installed.is_some() {
+            return Some(blocked(
+                desired,
+                user_id,
+                package_name,
+                format!("missing lock entry {key}"),
+            ));
+        }
+        return None;
+    };
+    if app.verification.require_package_name_match && entry.package_name != package_name {
+        return Some(blocked(
+            desired,
+            user_id,
+            package_name,
+            format!(
+                "lock package {} does not match declaration {package_name}",
+                entry.package_name
+            ),
+        ));
+    }
+    let current = installed?;
+    if !current.inspected {
+        return Some(blocked(
+            desired,
+            user_id,
+            package_name,
+            format!("inventory for {package_name} was not inspected"),
+        ));
+    }
+    if app.verification.require_signer_pin && !signers_match(&entry.signers, &current.signers) {
+        return Some(blocked(
+            desired,
+            user_id,
+            package_name,
+            format!("signer mismatch for {package_name}; source migration required"),
+        ));
+    }
+    None
+}
+
 fn compare_installed(
     desired: &DesiredDevice,
     user_id: u32,
@@ -249,6 +314,14 @@ fn compare_installed(
     current: &InstalledPackage,
     paths: Vec<PathBuf>,
 ) -> Result<AppPlan> {
+    if !current.inspected {
+        return Ok(AppPlan::Change(blocked(
+            desired,
+            user_id,
+            package_name,
+            format!("inventory for {package_name} was not inspected"),
+        )));
+    }
     if app.verification.require_signer_pin && !signers_match(&entry.signers, &current.signers) {
         return Ok(AppPlan::Change(blocked(
             desired,
@@ -277,6 +350,18 @@ fn compare_installed(
         return Ok(AppPlan::None);
     }
 
+    if desired.policies.newer_than_lock == "deny" {
+        return Ok(AppPlan::Change(blocked(
+            desired,
+            user_id,
+            package_name,
+            format!(
+                "{package_name} is newer than the lock ({} > {})",
+                current.version_code, entry.version_code
+            ),
+        )));
+    }
+
     Ok(AppPlan::Warning(format!(
         "{package_name} is newer than the lock ({} > {})",
         current.version_code, entry.version_code
@@ -287,7 +372,7 @@ fn host_install(
     desired: &DesiredDevice,
     locks: &LockFile,
     snapshot: &android_manager_model::DeviceSnapshot,
-    realized: &BTreeMap<String, PathBuf>,
+    realized: &BTreeMap<String, Vec<PathBuf>>,
     user_id: u32,
     package_name: &str,
     app: &DesiredApp,
@@ -310,6 +395,17 @@ fn host_install(
             format!("missing lock entry {key}"),
         )));
     };
+    if app.verification.require_package_name_match && entry.package_name != package_name {
+        return Ok(AppPlan::Change(blocked(
+            desired,
+            user_id,
+            package_name,
+            format!(
+                "lock package {} does not match declaration {package_name}",
+                entry.package_name
+            ),
+        )));
+    }
     if let Some(reason) = compatibility_issue(entry, snapshot) {
         return Ok(AppPlan::Change(blocked(
             desired,
@@ -318,8 +414,9 @@ fn host_install(
             reason,
         )));
     }
-    Ok(AppPlan::Change(install(
+    Ok(AppPlan::Change(install_or_enable(
         desired,
+        snapshot,
         user_id,
         package_name,
         entry,
@@ -362,11 +459,11 @@ fn compatibility_issue(
 
 fn artifact_paths(
     entry: &LockEntry,
-    realized: &BTreeMap<String, PathBuf>,
+    realized: &BTreeMap<String, Vec<PathBuf>>,
     key: &str,
 ) -> Vec<PathBuf> {
-    if let Some(path) = realized.get(key) {
-        return vec![path.clone()];
+    if let Some(paths) = realized.get(key) {
+        return paths.clone();
     }
     entry
         .artifacts
@@ -380,6 +477,43 @@ fn signers_match(expected: &[String], actual: &[String]) -> bool {
         return false;
     }
     expected.iter().collect::<BTreeSet<_>>() == actual.iter().collect::<BTreeSet<_>>()
+}
+
+fn install_or_enable(
+    desired: &DesiredDevice,
+    snapshot: &android_manager_model::DeviceSnapshot,
+    user_id: u32,
+    package_name: &str,
+    entry: &LockEntry,
+    artifact_paths: Vec<PathBuf>,
+) -> PlannedChange {
+    if snapshot
+        .packages
+        .iter()
+        .any(|package| package.name == package_name)
+    {
+        return enable_existing(desired, user_id, package_name, entry.version_code);
+    }
+    install(desired, user_id, package_name, entry, artifact_paths)
+}
+
+fn enable_existing(
+    desired: &DesiredDevice,
+    user_id: u32,
+    package_name: &str,
+    version_code: i64,
+) -> PlannedChange {
+    PlannedChange {
+        resource: package_resource_id(&desired.name, user_id, package_name),
+        kind: ChangeKind::Create,
+        summary: format!("Enable {package_name} version {version_code} for user {user_id}"),
+        operation: Operation::EnableExisting {
+            package_name: package_name.to_string(),
+        },
+        risk: Risk::Medium,
+        policy: PolicyDecision::Allow,
+        depends_on: Vec::new(),
+    }
 }
 
 fn install(

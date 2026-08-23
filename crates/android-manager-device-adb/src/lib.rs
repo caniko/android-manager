@@ -3,7 +3,7 @@ use android_manager_model::{
 };
 use anyhow::{anyhow, bail, Result};
 use nix_manager_core::exec::Captured;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub trait CommandRunner: Send + Sync {
     fn cap(&self, program: &str, args: &[&str]) -> Captured;
@@ -51,7 +51,7 @@ impl CommandRunner for ScriptedRunner {
 
 pub trait DeviceBackend {
     fn discover(&self, selector: &DeviceSelector) -> Result<String>;
-    fn snapshot(&self, serial: &str) -> Result<DeviceSnapshot>;
+    fn snapshot(&self, serial: &str, inspect: &[String]) -> Result<DeviceSnapshot>;
     fn execute(&self, serial: &str, user_id: u32, operation: &Operation) -> Result<()>;
 }
 
@@ -80,7 +80,7 @@ impl DeviceBackend for MemoryDevice {
         Ok(self.serial.clone())
     }
 
-    fn snapshot(&self, _serial: &str) -> Result<DeviceSnapshot> {
+    fn snapshot(&self, _serial: &str, _inspect: &[String]) -> Result<DeviceSnapshot> {
         Ok(self.snapshot.lock().expect("snapshot lock").clone())
     }
 
@@ -109,7 +109,22 @@ impl DeviceBackend for MemoryDevice {
                     version_name: None,
                     signers: signers.clone(),
                     enabled: true,
+                    inspected: true,
                 });
+            }
+            Operation::EnableExisting { package_name } => {
+                let donor = snapshot
+                    .packages
+                    .iter()
+                    .find(|pkg| pkg.name == *package_name)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("{package_name} is not installed on any user"))?;
+                snapshot
+                    .packages
+                    .retain(|pkg| !(pkg.name == *package_name && pkg.user_id == user_id));
+                snapshot
+                    .packages
+                    .push(InstalledPackage { user_id, ..donor });
             }
             Operation::Uninstall { package_name } => {
                 snapshot
@@ -159,7 +174,7 @@ impl<R: CommandRunner> DeviceBackend for AdbBackend<R> {
         }
     }
 
-    fn snapshot(&self, serial: &str) -> Result<DeviceSnapshot> {
+    fn snapshot(&self, serial: &str, inspect: &[String]) -> Result<DeviceSnapshot> {
         let manufacturer = self.prop(serial, "ro.product.manufacturer")?;
         let sdk = self
             .prop(serial, "ro.build.version.sdk")?
@@ -172,6 +187,8 @@ impl<R: CommandRunner> DeviceBackend for AdbBackend<R> {
             .map(ToOwned::to_owned)
             .collect();
         let users = parse_users(&self.shell(serial, &["pm", "list", "users"])?);
+        let inspect: BTreeSet<&str> = inspect.iter().map(String::as_str).collect();
+        let mut dump_cache = BTreeMap::new();
         let mut packages = Vec::new();
         for user in &users {
             let listed = self.shell(
@@ -179,8 +196,25 @@ impl<R: CommandRunner> DeviceBackend for AdbBackend<R> {
                 &["pm", "list", "packages", "--user", &user.to_string()],
             )?;
             for name in parse_packages(&listed) {
-                let dump = self.shell(serial, &["dumpsys", "package", &name])?;
-                packages.push(parse_package_dump(&name, *user, &dump));
+                if inspect.contains(name.as_str()) {
+                    if !dump_cache.contains_key(&name) {
+                        dump_cache.insert(
+                            name.clone(),
+                            self.shell(serial, &["dumpsys", "package", &name])?,
+                        );
+                    }
+                    packages.push(parse_package_dump(&name, *user, &dump_cache[&name]));
+                } else {
+                    packages.push(InstalledPackage {
+                        name,
+                        user_id: *user,
+                        version_code: 0,
+                        version_name: None,
+                        signers: Vec::new(),
+                        enabled: false,
+                        inspected: false,
+                    });
+                }
             }
         }
         Ok(DeviceSnapshot {
@@ -202,6 +236,7 @@ impl<R: CommandRunner> DeviceBackend for AdbBackend<R> {
                 if artifact_paths.is_empty() {
                     bail!("install is missing realized artifact paths");
                 }
+                let replace = matches!(operation, Operation::Upgrade { .. });
                 let mut args = vec![
                     "-s".to_string(),
                     serial.to_string(),
@@ -210,9 +245,12 @@ impl<R: CommandRunner> DeviceBackend for AdbBackend<R> {
                     } else {
                         "install-multiple".into()
                     },
-                    "--user".into(),
-                    user_id.to_string(),
                 ];
+                if replace {
+                    args.push("-r".into());
+                }
+                args.push("--user".into());
+                args.push(user_id.to_string());
                 args.extend(
                     artifact_paths
                         .iter()
@@ -220,6 +258,19 @@ impl<R: CommandRunner> DeviceBackend for AdbBackend<R> {
                 );
                 self.adb_ok(&args.iter().map(String::as_str).collect::<Vec<_>>())
             }
+            Operation::EnableExisting { package_name } => self
+                .shell(
+                    serial,
+                    &[
+                        "cmd",
+                        "package",
+                        "install-existing",
+                        "--user",
+                        &user_id.to_string(),
+                        package_name,
+                    ],
+                )
+                .map(|_| ()),
             Operation::Uninstall { package_name } => self.adb_ok(&[
                 "-s",
                 serial,
@@ -329,6 +380,7 @@ fn parse_package_dump(name: &str, user_id: u32, dump: &str) -> InstalledPackage 
         version_name,
         signers,
         enabled: true,
+        inspected: true,
     }
 }
 
@@ -349,6 +401,119 @@ mod tests {
         };
         let err = backend.discover(&DeviceSelector::default()).unwrap_err();
         assert!(err.to_string().contains("multiple adb devices"));
+    }
+
+    #[test]
+    fn upgrade_uses_replace_flag() {
+        let mut runner = ScriptedRunner::default();
+        runner.insert("adb -s SERIAL install -r --user 0 /tmp/app.apk", "");
+        let backend = AdbBackend {
+            runner,
+            adb: "adb".into(),
+        };
+        backend
+            .execute(
+                "SERIAL",
+                0,
+                &Operation::Upgrade {
+                    package_name: "org.example.app".into(),
+                    from: 1,
+                    to: 2,
+                    signers: vec![],
+                    artifact_paths: vec!["/tmp/app.apk".into()],
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn install_does_not_replace() {
+        let mut runner = ScriptedRunner::default();
+        runner.insert("adb -s SERIAL install --user 0 /tmp/app.apk", "");
+        let backend = AdbBackend {
+            runner,
+            adb: "adb".into(),
+        };
+        backend
+            .execute(
+                "SERIAL",
+                0,
+                &Operation::Install {
+                    package_name: "org.example.app".into(),
+                    version_code: 2,
+                    signers: vec![],
+                    artifact_paths: vec!["/tmp/app.apk".into()],
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn snapshot_dumpsys_only_inspected_packages() {
+        let mut runner = ScriptedRunner::default();
+        runner.insert(
+            "adb -s SERIAL shell getprop ro.product.manufacturer",
+            "Google",
+        );
+        runner.insert("adb -s SERIAL shell getprop ro.build.version.sdk", "35");
+        runner.insert(
+            "adb -s SERIAL shell getprop ro.product.cpu.abilist",
+            "arm64-v8a",
+        );
+        runner.insert(
+            "adb -s SERIAL shell pm list users",
+            "Users:\n\tUserInfo{0:Owner:c13} running",
+        );
+        runner.insert(
+            "adb -s SERIAL shell pm list packages --user 0",
+            "package:org.example.app\npackage:com.android.systemui\n",
+        );
+        runner.insert(
+            "adb -s SERIAL shell dumpsys package org.example.app",
+            "    versionCode=12\n    versionName=1.2\n    SHA-256 digest: ab:cd\n",
+        );
+        let backend = AdbBackend {
+            runner,
+            adb: "adb".into(),
+        };
+        let snapshot = backend
+            .snapshot("SERIAL", &["org.example.app".into()])
+            .unwrap();
+        let app = snapshot
+            .packages
+            .iter()
+            .find(|package| package.name == "org.example.app")
+            .unwrap();
+        assert_eq!(app.version_code, 12);
+        let extra = snapshot
+            .packages
+            .iter()
+            .find(|package| package.name == "com.android.systemui")
+            .unwrap();
+        assert!(!extra.inspected);
+        assert!(extra.signers.is_empty());
+    }
+
+    #[test]
+    fn enable_existing_uses_install_existing() {
+        let mut runner = ScriptedRunner::default();
+        runner.insert(
+            "adb -s SERIAL shell cmd package install-existing --user 10 org.example.app",
+            "Package org.example.app installed for user: 10",
+        );
+        let backend = AdbBackend {
+            runner,
+            adb: "adb".into(),
+        };
+        backend
+            .execute(
+                "SERIAL",
+                10,
+                &Operation::EnableExisting {
+                    package_name: "org.example.app".into(),
+                },
+            )
+            .unwrap();
     }
 
     #[test]

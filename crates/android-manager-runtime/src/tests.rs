@@ -258,7 +258,10 @@ fn obtainium_prerequisites_cover_every_user_and_deduplicate() {
             },
         ),
     ]);
-    let runtime = default_runtime(dir.path(), manifest, inspector);
+    let mut runtime = default_runtime(dir.path(), manifest, inspector);
+    let mut snapshot = empty_snapshot();
+    snapshot.users = vec![0, 10];
+    runtime.backend = MemoryDevice::new(snapshot);
     let plan = runtime.plan().unwrap();
     assert_eq!(plan.changes.len(), 5);
     let prerequisites: Vec<_> = plan
@@ -319,6 +322,7 @@ fn one_installed_user_and_one_malformed_app_do_not_suppress_other_users() {
             version_name: None,
             signers: Vec::new(),
             enabled: true,
+            inspected: true,
         });
     runtime.backend = MemoryDevice::new(snapshot);
     let plan = runtime.plan().unwrap();
@@ -375,6 +379,7 @@ fn verify_rejects_blocked_changes() {
             version_name: None,
             signers: vec!["sha256:bb".into()],
             enabled: true,
+            inspected: true,
         });
     runtime.backend = MemoryDevice::new(snapshot);
     assert!(runtime
@@ -454,4 +459,73 @@ fn direct_manifest_rejects_unknown_and_unnamed_external_sources() {
         .unwrap()
         .source = Some(SourceIntent::new("external"));
     assert!(validate_manifest_sources(&manifest).is_err());
+}
+
+#[test]
+fn use_lock_path_validates_before_replacing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (manifest, inspector) = fixture(dir.path());
+    let mut runtime = default_runtime(dir.path(), manifest, inspector);
+    let missing = dir.path().join("missing.lock.json");
+    runtime.use_lock_path(missing.clone()).unwrap();
+    assert!(runtime.lock.entries.is_empty());
+
+    let bad = dir.path().join("bad.lock.json");
+    fs::write(
+        &bad,
+        r#"{
+          "schemaVersion": 1,
+          "entries": {
+            "local:org.example.app": {
+              "source": {"type": "local", "path": "/tmp/app.apk"},
+              "packageName": "org.example.app",
+              "versionCode": 1,
+              "signers": ["sha256:aa"],
+              "artifacts": [{"kind": "apk", "path": "/tmp/app.apk", "sha256": "nope"}]
+            }
+          }
+        }"#,
+    )
+    .unwrap();
+    assert!(runtime.use_lock_path(bad).is_err());
+    assert_eq!(runtime.lock_path, missing);
+
+    assert!(runtime
+        .plan()
+        .unwrap_err()
+        .to_string()
+        .contains("lock file"));
+}
+
+#[test]
+fn invalid_device_name_is_rejected() {
+    assert!(validate_device_name("../escape").is_err());
+    assert!(validate_device_name("pixel10").is_ok());
+}
+
+#[test]
+fn expected_abi_and_user_are_checked() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut manifest, inspector) = fixture(dir.path());
+    manifest.device.expected.supported_abis = vec!["x86_64".into()];
+    let runtime = default_runtime(dir.path(), manifest, inspector);
+    assert!(runtime.inventory().unwrap_err().to_string().contains("ABI"));
+}
+
+#[test]
+fn signer_change_requires_explicit_migration() {
+    let dir = tempfile::tempdir().unwrap();
+    let (manifest, inspector) = fixture(dir.path());
+    let mut runtime = default_runtime(dir.path(), manifest, inspector);
+    runtime.lock().unwrap();
+    runtime
+        .lock
+        .entries
+        .values_mut()
+        .for_each(|entry| entry.signers = vec!["sha256:other".into()]);
+    assert!(runtime
+        .lock()
+        .unwrap_err()
+        .to_string()
+        .contains("signer change"));
 }

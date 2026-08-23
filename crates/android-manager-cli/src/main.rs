@@ -40,10 +40,7 @@ fn main() -> Result<()> {
         Box::new(ApkSignerInspector),
     )?;
     if let Some(path) = cli.lock_file {
-        runtime.lock_path = path;
-        if runtime.lock_path.exists() {
-            runtime.lock = serde_json::from_str(&fs::read_to_string(&runtime.lock_path)?)?;
-        }
+        runtime.use_lock_path(path)?;
     }
     match cli.command {
         Command::Lock => {

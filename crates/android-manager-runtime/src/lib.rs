@@ -15,15 +15,16 @@ use android_manager_delegate_obtainium::ObtainiumProvider;
 use android_manager_engine::plan_device_with_delegates;
 use android_manager_model::{
     lock_key, manual_resource_id, render_plan_json, AdapterKind, ChangeKind, DelegateOutcome,
-    LockEntry, LockFile, ManagementMode, PolicyDecision, SCHEMA_VERSION,
+    LockEntry, LockFile, LockedSource, ManagementMode, Operation, PolicyDecision, SCHEMA_VERSION,
 };
 use android_manager_plugin_protocol::{ExternalDelegateProvider, ExternalSourceProvider};
 use android_manager_provider_fdroid::FdroidProvider;
 use android_manager_provider_release::{GithubProvider, HttpProvider, LocalProvider};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::fs;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{self, File};
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -94,22 +95,14 @@ impl<B: DeviceBackend> Runtime<B> {
         inspector: Box<dyn ArtifactInspector>,
     ) -> Result<Self> {
         let manifest: Manifest = serde_json::from_str(&fs::read_to_string(config_path)?)?;
+        validate_device_name(&manifest.device.name)?;
         validate_manifest_secrets(&manifest)?;
         validate_manifest_sources(&manifest)?;
         let lock_path = manifest
             .lock_path
             .clone()
             .unwrap_or_else(|| PathBuf::from("android-manager.lock.json"));
-        let lock = if lock_path.exists() {
-            let lock: LockFile = serde_json::from_str(&fs::read_to_string(&lock_path)?)?;
-            validate_lock_file(&lock)?;
-            lock
-        } else {
-            LockFile {
-                schema_version: SCHEMA_VERSION,
-                entries: BTreeMap::new(),
-            }
-        };
+        let lock = load_lock_file(&lock_path)?;
         let state_dir = default_state_dir()?
             .join("devices")
             .join(&manifest.device.name);
@@ -135,7 +128,15 @@ impl<B: DeviceBackend> Runtime<B> {
         })
     }
 
+    pub fn use_lock_path(&mut self, path: PathBuf) -> Result<()> {
+        let lock = load_lock_file(&path)?;
+        self.lock_path = path;
+        self.lock = lock;
+        Ok(())
+    }
+
     pub fn lock(&mut self) -> Result<LockFile> {
+        let policies = self.manifest.device.policies.clone();
         for user in self.manifest.device.users.values() {
             for (package_name, app) in &user.apps {
                 if app.management != ManagementMode::Host || app.source.is_none() {
@@ -145,6 +146,9 @@ impl<B: DeviceBackend> Runtime<B> {
                 let provider = self.providers.resolve(source)?;
                 let (key, entry) = provider.resolve(ResolveRequest { package_name, app })?;
                 validate_resolved_entry(package_name, app, &key, &entry, self.inspector.as_ref())?;
+                if let Some(old) = self.lock.entries.get(&key) {
+                    reject_implicit_migration(package_name, old, &entry, &policies)?;
+                }
                 self.lock.entries.insert(key, entry);
             }
         }
@@ -162,9 +166,7 @@ impl<B: DeviceBackend> Runtime<B> {
                 paths.push(path);
             }
             validate_realized_entry(entry, &paths, self.inspector.as_ref())?;
-            if let Some(path) = paths.into_iter().next() {
-                self.manifest.realized_artifacts.insert(key.clone(), path);
-            }
+            self.manifest.realized_artifacts.insert(key.clone(), paths);
         }
         Ok(())
     }
@@ -173,7 +175,14 @@ impl<B: DeviceBackend> Runtime<B> {
         let serial = self
             .backend
             .discover(&self.manifest.device.transport.selector)?;
-        let snapshot = self.backend.snapshot(&serial)?;
+        let inspect: Vec<String> = self
+            .manifest
+            .device
+            .users
+            .values()
+            .flat_map(|user| user.apps.keys().cloned())
+            .collect();
+        let snapshot = self.backend.snapshot(&serial, &inspect)?;
         if let Some(expected) = &self.manifest.device.expected.manufacturer {
             if snapshot.manufacturer.as_deref() != Some(expected.as_str()) {
                 bail!(
@@ -182,10 +191,30 @@ impl<B: DeviceBackend> Runtime<B> {
                 );
             }
         }
+        let expected_abis = &self.manifest.device.expected.supported_abis;
+        if !expected_abis.is_empty()
+            && !expected_abis
+                .iter()
+                .any(|abi| snapshot.abis.iter().any(|have| have == abi))
+        {
+            bail!(
+                "device ABIs {:?} do not overlap expected {expected_abis:?}",
+                snapshot.abis
+            );
+        }
+        for user in self.manifest.device.users.values() {
+            if !snapshot.users.contains(&user.android_user_id) {
+                bail!(
+                    "declared android user {} is not on the device",
+                    user.android_user_id
+                );
+            }
+        }
         Ok(snapshot)
     }
 
     pub fn plan(&self) -> Result<ExecutionPlan> {
+        self.ensure_lock_present()?;
         let snapshot = self.inventory()?;
         let delegates = self.delegate_outcomes(&snapshot);
         plan_device_with_delegates(
@@ -212,6 +241,8 @@ impl<B: DeviceBackend> Runtime<B> {
     }
 
     pub fn apply(&mut self, expected: Option<&ExecutionPlan>) -> Result<Journal> {
+        self.ensure_lock_present()?;
+        let _guard = acquire_apply_lock(&self.state_dir)?;
         self.realize()?;
         let plan = self.plan()?;
         if let Some(expected) = expected {
@@ -241,9 +272,14 @@ impl<B: DeviceBackend> Runtime<B> {
         let serial = self
             .backend
             .discover(&self.manifest.device.transport.selector)?;
+        let already = match self.read_journal()? {
+            Some(journal) if journal.status != "ok" => journal.completed,
+            _ => Vec::new(),
+        };
+        let completed: BTreeSet<_> = already.iter().cloned().collect();
         let mut journal = Journal {
             status: "pending".into(),
-            completed: Vec::new(),
+            completed: already,
             failed: None,
         };
         self.write_journal(&journal)?;
@@ -252,11 +288,17 @@ impl<B: DeviceBackend> Runtime<B> {
             .iter()
             .filter(|change| change.kind.is_automatic())
         {
+            if completed.contains(&change.resource) {
+                continue;
+            }
             let user_id = user_id_from_resource(&change.resource)?;
             match self.backend.execute(&serial, user_id, &change.operation) {
                 Ok(()) => {
                     if let Some(package) = package_from_resource(&change.resource) {
-                        self.adopt(&package)?;
+                        match &change.operation {
+                            Operation::Uninstall { .. } => self.forget(&package)?,
+                            _ => self.adopt(&package)?,
+                        }
                     }
                     journal.completed.push(change.resource.clone());
                     self.write_journal(&journal)?;
@@ -300,15 +342,40 @@ impl<B: DeviceBackend> Runtime<B> {
         Ok(render_plan_human(plan))
     }
 
+    fn ensure_lock_present(&self) -> Result<()> {
+        let needs_lock = self.manifest.device.users.values().any(|user| {
+            user.apps
+                .values()
+                .any(|app| app.management == ManagementMode::Host && app.source.is_some())
+        });
+        if needs_lock && !self.lock_path.exists() {
+            bail!(
+                "lock file {} is missing; run lock first",
+                self.lock_path.display()
+            );
+        }
+        Ok(())
+    }
+
     fn adopt(&self, package: &str) -> Result<()> {
         let mut ledger = self.read_ledger()?;
         ledger
             .packages
             .insert(package.to_string(), LedgerEntry { owned: true });
+        self.write_ledger(&ledger)
+    }
+
+    fn forget(&self, package: &str) -> Result<()> {
+        let mut ledger = self.read_ledger()?;
+        ledger.packages.remove(package);
+        self.write_ledger(&ledger)
+    }
+
+    fn write_ledger(&self, ledger: &Ledger) -> Result<()> {
         let path = self.state_dir.join("ledger.json");
         nix_manager_core::fs::atomic_write_0600(
             &path,
-            serde_json::to_vec_pretty(&ledger)?.as_slice(),
+            serde_json::to_vec_pretty(ledger)?.as_slice(),
         )
     }
 
@@ -318,6 +385,14 @@ impl<B: DeviceBackend> Runtime<B> {
             return Ok(Ledger::default());
         }
         Ok(serde_json::from_str(&fs::read_to_string(path)?)?)
+    }
+
+    fn read_journal(&self) -> Result<Option<Journal>> {
+        let path = self.state_dir.join("journal.json");
+        if !path.exists() {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::from_str(&fs::read_to_string(path)?)?))
     }
 
     fn write_journal(&self, journal: &Journal) -> Result<()> {
@@ -373,6 +448,55 @@ impl<B: DeviceBackend> Runtime<B> {
         }
         outcomes
     }
+}
+
+fn validate_device_name(name: &str) -> Result<()> {
+    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\', '\0']) {
+        bail!("invalid device name");
+    }
+    Ok(())
+}
+
+fn reject_implicit_migration(
+    package_name: &str,
+    old: &LockEntry,
+    new: &LockEntry,
+    policies: &android_manager_model::Policies,
+) -> Result<()> {
+    if source_changed(&old.source, &new.source) && policies.source_migration == "deny-implicit" {
+        bail!("implicit source migration for {package_name} is denied");
+    }
+    if old.signers != new.signers && policies.signer_changes == "require-explicit-migration" {
+        bail!("signer change for {package_name} requires explicit migration");
+    }
+    Ok(())
+}
+
+fn source_changed(old: &LockedSource, new: &LockedSource) -> bool {
+    old.kind != new.kind
+        || old.adapter != new.adapter
+        || old.repository != new.repository
+        || old.repository_identity != new.repository_identity
+        || old.path != new.path
+        || old.url != new.url
+}
+
+struct ApplyGuard {
+    _file: File,
+}
+
+fn acquire_apply_lock(state_dir: &Path) -> Result<ApplyGuard> {
+    fs::create_dir_all(state_dir)?;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(state_dir.join("apply.lock"))?;
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        bail!("another apply is already running for this device");
+    }
+    Ok(ApplyGuard { _file: file })
 }
 
 fn validate_delegate_plan(
@@ -498,6 +622,18 @@ fn validate_resolved_entry(
         validate_realized_entry(entry, &paths, inspector)?;
     }
     Ok(())
+}
+
+fn load_lock_file(path: &Path) -> Result<LockFile> {
+    if !path.exists() {
+        return Ok(LockFile {
+            schema_version: SCHEMA_VERSION,
+            entries: BTreeMap::new(),
+        });
+    }
+    let lock: LockFile = serde_json::from_str(&fs::read_to_string(path)?)?;
+    validate_lock_file(&lock)?;
+    Ok(lock)
 }
 
 fn validate_lock_file(lock: &LockFile) -> Result<()> {

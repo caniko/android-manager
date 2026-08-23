@@ -134,6 +134,7 @@ dependencies = [
  "android-manager-provider-fdroid",
  "android-manager-provider-release",
  "anyhow",
+ "libc",
  "nix-manager-core",
  "serde",
  "serde_json",

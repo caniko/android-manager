@@ -388,7 +388,7 @@ nix-manager-core.lib.mkManagerOutputs {
       module-evaluation-invalid = pkgs.writeText "android-manager-invalid-evals.json" (
         builtins.toJSON invalidEvalNames
       );
-      lock-realization = realizedFixture.fixture;
+      lock-realization = builtins.head realizedFixture.fixture;
     });
   };
 }

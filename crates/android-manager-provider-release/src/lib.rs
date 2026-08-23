@@ -132,30 +132,6 @@ source_provider!(
         .ok_or_else(|| "github source requires repository".to_string())
 );
 
-pub fn resolve_host_app(
-    package_name: &str,
-    app: &DesiredApp,
-    inspector: &dyn ArtifactInspector,
-    github: Option<&dyn ReleaseFetcher>,
-) -> Result<(String, LockEntry)> {
-    let source = app
-        .source
-        .as_ref()
-        .ok_or_else(|| anyhow!("{package_name} has no source"))?;
-    match source.kind.as_str() {
-        "local" => resolve_local(package_name, app, source, inspector),
-        "http" => resolve_http(package_name, app, source, inspector),
-        "github" => resolve_github(
-            package_name,
-            app,
-            source,
-            inspector,
-            github.ok_or_else(|| anyhow!("github resolver requires a release fetcher"))?,
-        ),
-        other => bail!("provider {other} is not implemented"),
-    }
-}
-
 fn resolve_local(
     package_name: &str,
     app: &DesiredApp,

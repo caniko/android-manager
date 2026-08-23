@@ -36,7 +36,7 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lock_path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub realized_artifacts: BTreeMap<String, PathBuf>,
+    pub realized_artifacts: BTreeMap<String, Vec<PathBuf>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub adapters: BTreeMap<String, ExternalAdapter>,
 }
@@ -374,6 +374,8 @@ pub struct InstalledPackage {
     pub signers: Vec<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub inspected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -502,6 +504,9 @@ pub enum Operation {
         artifact_paths: Vec<PathBuf>,
     },
     Uninstall {
+        package_name: String,
+    },
+    EnableExisting {
         package_name: String,
     },
     Manual {
