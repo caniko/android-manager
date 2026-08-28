@@ -15,7 +15,7 @@
     git-hooks.inputs.nixpkgs.follows = "nixpkgs";
 
     nix-manager-core = {
-      url = "git+https://github.com/caniko/nix-manager-core?rev=06eef7cdcbaf81a9a233aedb15063c62d040ec83";
+      url = "git+https://github.com/caniko/nix-manager-core?rev=ef2ed19e4747eac70daaea338e147c972e5d5f75";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.rs-harbor.follows = "rs-harbor";
       inputs.rust-overlay.follows = "rust-overlay";

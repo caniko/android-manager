@@ -33,7 +33,7 @@ android-manager-device-adb = { path = "crates/android-manager-device-adb" }
 android-manager-delegate-obtainium = { path = "crates/android-manager-delegate-obtainium" }
 android-manager-plugin-protocol = { path = "crates/android-manager-plugin-protocol" }
 android-manager-runtime = { path = "crates/android-manager-runtime" }
-nix-manager-core = { git = "https://github.com/caniko/nix-manager-core.git", rev = "06eef7cdcbaf81a9a233aedb15063c62d040ec83" }
+nix-manager-core = { git = "https://github.com/caniko/nix-manager-core.git", rev = "ef2ed19e4747eac70daaea338e147c972e5d5f75" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

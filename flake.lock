@@ -194,13 +194,13 @@
         "lastModified": 1787225516,
         "narHash": "sha256-Bz5vUCCH7ZZpaFj/V5ANBMDLPgxEE/Fc5jYGfBlMm8Q=",
         "ref": "refs/heads/trunk",
-        "rev": "06eef7cdcbaf81a9a233aedb15063c62d040ec83",
+        "rev": "ef2ed19e4747eac70daaea338e147c972e5d5f75",
         "revCount": 52,
         "type": "git",
         "url": "https://github.com/caniko/nix-manager-core"
       },
       "original": {
-        "rev": "06eef7cdcbaf81a9a233aedb15063c62d040ec83",
+        "rev": "ef2ed19e4747eac70daaea338e147c972e5d5f75",
         "type": "git",
         "url": "https://github.com/caniko/nix-manager-core"
       }
