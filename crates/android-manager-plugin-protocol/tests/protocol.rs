@@ -17,25 +17,16 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 fn fixture_bin() -> PathBuf {
-    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_android_manager_protocol_fixture") {
-        return PathBuf::from(path);
-    }
-    let mut path = std::env::current_exe().expect("test executable");
-    path.pop();
-    if path.ends_with("deps") {
-        path.pop();
-    }
-    path.push("android-manager-protocol-fixture");
-    path
+    // Nextest remaps binary paths when Crane runs a partitioned archive.
+    std::env::var_os("NEXTEST_BIN_EXE_android-manager-protocol-fixture")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_android-manager-protocol-fixture").into())
 }
 
 fn no_read_fixture_bin() -> PathBuf {
-    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_android_manager_protocol_no_read_fixture") {
-        return PathBuf::from(path);
-    }
-    let mut path = fixture_bin();
-    path.set_file_name("android-manager-protocol-no-read-fixture");
-    path
+    std::env::var_os("NEXTEST_BIN_EXE_android-manager-protocol-no-read-fixture")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_android-manager-protocol-no-read-fixture").into())
 }
 
 fn adapter(kind: AdapterKind, fail: Option<&str>) -> ExternalAdapter {

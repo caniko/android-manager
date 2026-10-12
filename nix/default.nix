@@ -1,7 +1,7 @@
 {
   self,
   nixpkgs,
-  rs-harbor,
+  harbor,
   rust-overlay,
   treefmt-nix,
   git-hooks,
@@ -9,7 +9,7 @@
   ...
 }:
 nix-manager-core.lib.mkManagerOutputs {
-  inherit self nixpkgs rs-harbor rust-overlay treefmt-nix git-hooks;
+  inherit self nixpkgs harbor rust-overlay treefmt-nix git-hooks;
   crateName = "android-manager";
   srcDir = ../.;
   extraRuntimePackages = pkgs: [pkgs.android-tools pkgs.curl pkgs.openssl pkgs.unzip];
@@ -75,7 +75,7 @@ nix-manager-core.lib.mkManagerOutputs {
 
     checks = forAllSystems (system: let
       pkgs = pkgsFor system;
-      fixtureApk = pkgs.writeText "fixture.apk" "fake-apk-bytes";
+      fixtureApk = ./fixtures/fixture.apk;
       adapterBin = pkgs.writeShellScript "external-adapter" "true";
       evaluated = evalFleet {
         modules = [
@@ -374,7 +374,9 @@ nix-manager-core.lib.mkManagerOutputs {
           entries.fixture = {
             artifacts = [
               {
-                path = "${fixtureApk}";
+                # Preserve the source path instead of copying it to a new
+                # store path during no-IFD evaluation.
+                path = toString fixtureApk;
                 sha256 = builtins.hashFile "sha256" fixtureApk;
               }
             ];

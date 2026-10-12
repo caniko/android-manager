@@ -70,7 +70,11 @@ fn fixture_manifest(
             "fixture".into(),
             ExternalAdapter {
                 kind: AdapterKind::Source,
-                executable: env!("CARGO_BIN_EXE_android-manager-fixture-adapter").into(),
+                executable: std::env::var_os("NEXTEST_BIN_EXE_android-manager-fixture-adapter")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| {
+                        env!("CARGO_BIN_EXE_android-manager-fixture-adapter").into()
+                    }),
                 capabilities: BTreeSet::from([AdapterCapability::Resolve]),
                 environment: AdapterEnvironment::default(),
                 config: BTreeMap::new(),
