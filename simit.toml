@@ -3,4 +3,6 @@ runtime = "nix"
 runner = "ubuntu-24.04"
 platform = "github"
 provider = "actions"
+workspace = true
+workspace_strategy = "aggregate"
 publish_crates = false
