@@ -75,7 +75,7 @@ nix-manager-core.lib.mkManagerOutputs {
 
     checks = forAllSystems (system: let
       pkgs = pkgsFor system;
-      fixtureApk = pkgs.writeText "fixture.apk" "fake-apk-bytes";
+      fixtureApk = ../examples/local-apk/app.apk;
       adapterBin = pkgs.writeShellScript "external-adapter" "true";
       evaluated = evalFleet {
         modules = [
