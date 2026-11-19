@@ -2,7 +2,7 @@
   description = "Declarative Android device manager built on nix-manager-core";
 
   inputs = {
-    rs-harbor.url = "git+https://github.com/caniko/rs-harbor.git?ref=trunk&rev=adbbcf515fe831f9683a786410556d94372202eb";
+    rs-harbor.url = "git+https://github.com/caniko/rs-harbor.git?ref=trunk&rev=3017b628b3a0603c2ebf7347a46951e8457ad414";
 
     nixpkgs.follows = "rs-harbor/nixpkgs";
     rust-overlay.follows = "rs-harbor/rust-overlay";
